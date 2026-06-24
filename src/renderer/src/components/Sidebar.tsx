@@ -1,5 +1,5 @@
 import { useSessions } from '../store/sessions'
-import type { SessionInfo } from '../../../../shared/types'
+import type { SessionInfo } from '../../../shared/types'
 
 const STATE_CLASS: Record<SessionInfo['state'], string> = {
   idle:    'bg-ctp-green',
