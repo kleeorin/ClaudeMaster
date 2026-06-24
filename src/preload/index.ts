@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SessionInfo, SavedSession } from '../shared/types'
+import type { SessionInfo, SavedSession, DirEntry } from '../shared/types'
 
 contextBridge.exposeInMainWorld('api', {
   session: {
@@ -33,6 +33,14 @@ contextBridge.exposeInMainWorld('api', {
   dialog: {
     openDir: (): Promise<string | null> =>
       ipcRenderer.invoke('dialog:openDir'),
+  },
+  fs: {
+    readDir: (path: string): Promise<DirEntry[]> =>
+      ipcRenderer.invoke('fs:readDir', path),
+  },
+  shell: {
+    openPath: (path: string): Promise<string> =>
+      ipcRenderer.invoke('shell:openPath', path),
   },
   jupyter: {
     start: (): Promise<{ url: string; token: string } | null> =>

@@ -13,3 +13,8 @@ export interface SavedSession {
   scrollback: string
   paneScrollback?: string
 }
+
+export interface DirEntry {
+  name: string
+  isDir: boolean
+}

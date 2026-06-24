@@ -1,4 +1,4 @@
-import type { SessionInfo, SessionState, SavedSession } from '../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, DirEntry } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -21,6 +21,12 @@ declare global {
       }
       dialog: {
         openDir: () => Promise<string | null>
+      }
+      fs: {
+        readDir: (path: string) => Promise<DirEntry[]>
+      }
+      shell: {
+        openPath: (path: string) => Promise<string>
       }
       jupyter: {
         start: () => Promise<{ url: string; token: string } | null>

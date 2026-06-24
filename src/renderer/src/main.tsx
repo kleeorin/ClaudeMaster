@@ -4,6 +4,7 @@ import './index.css'
 import { App } from './App'
 import { SessionProvider } from './store/sessions'
 import { NotebookProvider } from './store/notebooks'
+import { FileBrowserProvider } from './store/fileBrowser'
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -34,7 +35,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <ErrorBoundary>
       <SessionProvider>
         <NotebookProvider>
-          <App />
+          <FileBrowserProvider>
+            <App />
+          </FileBrowserProvider>
         </NotebookProvider>
       </SessionProvider>
     </ErrorBoundary>

@@ -1,19 +1,24 @@
 import { lazy, Suspense } from 'react'
 import { useSessions } from './store/sessions'
 import { useNotebooks } from './store/notebooks'
+import { useFileBrowser } from './store/fileBrowser'
 import { Sidebar } from './components/Sidebar'
 import { Toolbar } from './components/Toolbar'
 import { TerminalView } from './components/TerminalView'
 import { PaneView } from './components/PaneView'
 import { ContextMenu } from './components/ContextMenu'
+import { FileBrowserView } from './components/FileBrowserView'
 
 const NotebookView = lazy(() => import('./components/NotebookView').then(m => ({ default: m.NotebookView })))
 
 export function App() {
   const { sessions, activeId, paneFor, panes, paneVisible, savedPaneScrollback } = useSessions()
   const { notebooks } = useNotebooks()
+  const { browsers } = useFileBrowser()
   const activePaneId = activeId ? paneFor(activeId) : null
   const notebookOpen = activeId ? (notebooks[activeId]?.open ?? false) : false
+  const browserOpen = activeId ? (browsers[activeId]?.open ?? false) : false
+  const activeCwd = activeId ? sessions.find((s) => s.id === activeId)?.cwd ?? '' : ''
 
   return (
     <div className="flex h-screen overflow-hidden bg-ctp-base text-ctp-text">
@@ -50,6 +55,12 @@ export function App() {
               <Suspense fallback={null}>
                 <NotebookView sessionId={activeId} />
               </Suspense>
+            </div>
+          )}
+
+          {browserOpen && activeId && (
+            <div className="w-[30%] min-w-[220px] shrink-0">
+              <FileBrowserView sessionId={activeId} cwd={activeCwd} />
             </div>
           )}
         </div>

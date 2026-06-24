@@ -1,6 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import { join } from 'path'
 import { homedir } from 'os'
+import { readdir } from 'fs/promises'
+import type { DirEntry } from '../shared/types'
 import { SessionManager } from './sessionManager'
 import { PaneManager } from './paneManager'
 import { JupyterManager } from './jupyterManager'
@@ -86,6 +88,22 @@ ipcMain.handle('pane:create', (_, cwd: string) => panes.create(cwd))
 ipcMain.handle('pane:destroy', (_, id: string) => panes.destroy(id))
 ipcMain.on('pane:input', (_, id: string, data: string) => panes.sendInput(id, data))
 ipcMain.on('pane:resize', (_, id: string, cols: number, rows: number) => panes.resize(id, cols, rows))
+
+ipcMain.handle('fs:readDir', async (_, path: string): Promise<DirEntry[]> => {
+  try {
+    const entries = await readdir(path, { withFileTypes: true })
+    return entries
+      .map((e) => ({ name: e.name, isDir: e.isDirectory() }))
+      .sort((a, b) =>
+        a.isDir !== b.isDir
+          ? a.isDir ? -1 : 1
+          : a.name.localeCompare(b.name)
+      )
+  } catch {
+    return []
+  }
+})
+ipcMain.handle('shell:openPath', (_, path: string) => shell.openPath(path))
 
 ipcMain.handle('jupyter:start', () => jupyter.start())
 ipcMain.handle('jupyter:install', () => jupyter.install())
