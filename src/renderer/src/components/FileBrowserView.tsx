@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useFileBrowser } from '../store/fileBrowser'
-import type { DirEntry } from '../../../shared/types'
+import { FilePreview } from './FilePreview'
+import type { DirEntry, FilePreview as Preview } from '../../../shared/types'
 
 interface Props {
   sessionId: string
@@ -11,6 +12,7 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
   const { browsers, navigate } = useFileBrowser()
   const [entries, setEntries] = useState<DirEntry[]>([])
   const [loading, setLoading] = useState(false)
+  const [preview, setPreview] = useState<{ data: Preview; path: string } | null>(null)
 
   const path = browsers[sessionId]?.path ?? cwd
   const atRoot = path === cwd
@@ -35,10 +37,14 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
     navigate(sessionId, parent.length < cwd.length ? cwd : parent)
   }
 
-  const onEntry = (e: DirEntry) => {
+  const onEntry = async (e: DirEntry) => {
     const full = `${path}/${e.name}`
-    if (e.isDir) navigate(sessionId, full)
-    else window.api.shell.openPath(full)
+    if (e.isDir) {
+      navigate(sessionId, full)
+      return
+    }
+    // Preview in-app so it works over VNC on remote launches.
+    setPreview({ data: await window.api.fs.readFile(full), path: full })
   }
 
   return (
@@ -70,7 +76,7 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
               key={e.name}
               onDoubleClick={e.isDir ? undefined : () => onEntry(e)}
               onClick={e.isDir ? () => onEntry(e) : undefined}
-              title={e.isDir ? `Open ${e.name}` : `Open ${e.name} with default app`}
+              title={e.isDir ? `Open ${e.name}` : `Preview ${e.name}`}
               className="w-full flex items-center gap-2 px-3 py-1 text-xs text-left text-ctp-text hover:bg-ctp-surface0"
             >
               {e.isDir ? (
@@ -88,6 +94,17 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
           ))
         )}
       </div>
+
+      {preview && (
+        <FilePreview
+          preview={preview.data}
+          onClose={() => setPreview(null)}
+          onOpenExternal={() => {
+            window.api.shell.openPath(preview.path)
+            setPreview(null)
+          }}
+        />
+      )}
     </div>
   )
 }

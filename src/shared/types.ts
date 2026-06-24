@@ -18,3 +18,11 @@ export interface DirEntry {
   name: string
   isDir: boolean
 }
+
+// In-app file preview, returned by fs:readFile. Travels over IPC (and therefore
+// over VNC for remote launches), so no external viewer / window manager needed.
+export type FilePreview =
+  | { kind: 'image'; name: string; dataUrl: string }
+  | { kind: 'text'; name: string; text: string; truncated: boolean }
+  | { kind: 'binary'; name: string }
+  | { kind: 'error'; name: string; message: string }

@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
-import { join } from 'path'
+import { join, extname, basename } from 'path'
 import { homedir } from 'os'
-import { readdir } from 'fs/promises'
-import type { DirEntry } from '../shared/types'
+import { readdir, readFile, stat } from 'fs/promises'
+import type { DirEntry, FilePreview } from '../shared/types'
 import { SessionManager } from './sessionManager'
 import { PaneManager } from './paneManager'
 import { JupyterManager } from './jupyterManager'
@@ -104,6 +104,42 @@ ipcMain.handle('fs:readDir', async (_, path: string): Promise<DirEntry[]> => {
   }
 })
 ipcMain.handle('shell:openPath', (_, path: string) => shell.openPath(path))
+
+const IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.avif': 'image/avif',
+}
+const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2 MB cap for text previews
+
+ipcMain.handle('fs:readFile', async (_, path: string): Promise<FilePreview> => {
+  const name = basename(path)
+  try {
+    const ext = extname(path).toLowerCase()
+    const mime = IMAGE_MIME[ext]
+    if (mime) {
+      const buf = await readFile(path)
+      return { kind: 'image', name, dataUrl: `data:${mime};base64,${buf.toString('base64')}` }
+    }
+
+    const { size } = await stat(path)
+    const buf = await readFile(path)
+    // Binary heuristic: a NUL byte in the first chunk means "not text".
+    if (buf.subarray(0, 8000).includes(0)) return { kind: 'binary', name }
+
+    const truncated = size > MAX_TEXT_BYTES
+    const text = buf.subarray(0, MAX_TEXT_BYTES).toString('utf8')
+    return { kind: 'text', name, text, truncated }
+  } catch (err) {
+    return { kind: 'error', name, message: err instanceof Error ? err.message : String(err) }
+  }
+})
 
 ipcMain.handle('jupyter:start', () => jupyter.start())
 ipcMain.handle('jupyter:install', () => jupyter.install())

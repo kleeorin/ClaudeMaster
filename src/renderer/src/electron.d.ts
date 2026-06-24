@@ -1,4 +1,4 @@
-import type { SessionInfo, SessionState, SavedSession, DirEntry } from '../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -24,6 +24,7 @@ declare global {
       }
       fs: {
         readDir: (path: string) => Promise<DirEntry[]>
+        readFile: (path: string) => Promise<FilePreview>
       }
       shell: {
         openPath: (path: string) => Promise<string>
