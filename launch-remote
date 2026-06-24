@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+#
+# launch-remote — run ClaudeMaster (Electron) on a headless/remote machine and
+# stream the GUI over VNC. Run this ON the remote box, then connect a VNC viewer
+# from your laptop:
+#
+#   ssh -L ${VNC_PORT:-5900}:localhost:${VNC_PORT:-5900} user@remote
+#   # then point a VNC viewer at localhost:5900
+#
+# All the work (Claude sessions, Jupyter kernels, files) runs here on the remote.
+#
+# Config via env vars:
+#   DISPLAY_NUM   virtual X display number      (default: 99)
+#   RESOLUTION    virtual screen geometry        (default: 1920x1080x24)
+#   VNC_PORT      VNC port, bound to localhost    (default: 5900)
+#   VNC_PASSWORD  if set, require this password to connect (recommended)
+#
+set -euo pipefail
+
+cd "$(dirname "$(readlink -f "$0")")"
+
+DISPLAY_NUM="${DISPLAY_NUM:-99}"
+RESOLUTION="${RESOLUTION:-1920x1080x24}"
+VNC_PORT="${VNC_PORT:-5900}"
+DISPLAY=":${DISPLAY_NUM}"
+
+# --- dependency check -------------------------------------------------------
+missing=()
+for bin in Xvfb x11vnc npm; do
+  command -v "$bin" >/dev/null 2>&1 || missing+=("$bin")
+done
+if (( ${#missing[@]} )); then
+  echo "Missing required tools: ${missing[*]}" >&2
+  echo "Install with: sudo apt install xvfb x11vnc" >&2
+  exit 1
+fi
+
+# --- cleanup ----------------------------------------------------------------
+pids=()
+passfile=""
+cleanup() {
+  echo
+  echo "Shutting down…"
+  for pid in "${pids[@]:-}"; do
+    [[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true
+  done
+  [[ -n "$passfile" ]] && rm -f "$passfile"
+  wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# --- fail early if the display is already in use ----------------------------
+if [[ -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]]; then
+  echo "Display ${DISPLAY} already in use. Set DISPLAY_NUM to a free number." >&2
+  exit 1
+fi
+
+# --- virtual display --------------------------------------------------------
+echo "Starting Xvfb on ${DISPLAY} (${RESOLUTION})…"
+Xvfb "${DISPLAY}" -screen 0 "${RESOLUTION}" >/dev/null 2>&1 &
+pids+=($!)
+
+# wait for the X server to come up
+for _ in $(seq 1 50); do
+  [[ -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]] && break
+  sleep 0.1
+done
+if [[ ! -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]]; then
+  echo "Xvfb failed to start on ${DISPLAY}" >&2
+  exit 1
+fi
+
+# --- VNC server -------------------------------------------------------------
+echo "Starting x11vnc on localhost:${VNC_PORT}…"
+vnc_auth=(-nopw)
+if [[ -n "${VNC_PASSWORD:-}" ]]; then
+  passfile="$(mktemp)"
+  x11vnc -storepasswd "${VNC_PASSWORD}" "$passfile" >/dev/null 2>&1
+  vnc_auth=(-rfbauth "$passfile")
+else
+  echo "WARNING: no VNC_PASSWORD set. VNC is bound to localhost only;" >&2
+  echo "         reach it via 'ssh -L ${VNC_PORT}:localhost:${VNC_PORT}'." >&2
+fi
+
+x11vnc -display "${DISPLAY}" -localhost -rfbport "${VNC_PORT}" \
+  -forever -shared "${vnc_auth[@]}" >/dev/null 2>&1 &
+pids+=($!)
+
+# --- the app ----------------------------------------------------------------
+echo "Launching ClaudeMaster on ${DISPLAY}…"
+echo
+echo "  Connect:  ssh -L ${VNC_PORT}:localhost:${VNC_PORT} <you>@<this-host>"
+echo "            then open a VNC viewer at localhost:${VNC_PORT}"
+echo
+echo "  Press Ctrl-C here to stop everything."
+echo
+
+# Run in the foreground (not exec) so the EXIT trap fires and tears down
+# Xvfb/x11vnc when the app — or this script — stops.
+export DISPLAY
+npm run dev
