@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SessionInfo, SavedSession, DirEntry, FilePreview } from '../shared/types'
+import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult } from '../shared/types'
 
 contextBridge.exposeInMainWorld('api', {
   session: {
@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('fs:readDir', path),
     readFile: (path: string): Promise<FilePreview> =>
       ipcRenderer.invoke('fs:readFile', path),
+    writeFile: (path: string, content: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('fs:writeFile', path, content),
   },
   shell: {
     openPath: (path: string): Promise<string> =>

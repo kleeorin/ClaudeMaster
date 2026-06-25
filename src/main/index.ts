@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import { join, extname, basename } from 'path'
 import { homedir } from 'os'
-import { readdir, readFile, stat } from 'fs/promises'
-import type { DirEntry, FilePreview } from '../shared/types'
+import { readdir, readFile, writeFile, stat } from 'fs/promises'
+import type { DirEntry, FilePreview, WriteResult } from '../shared/types'
 import { SessionManager } from './sessionManager'
 import { PaneManager } from './paneManager'
 import { JupyterManager } from './jupyterManager'
@@ -138,6 +138,15 @@ ipcMain.handle('fs:readFile', async (_, path: string): Promise<FilePreview> => {
     return { kind: 'text', name, text, truncated }
   } catch (err) {
     return { kind: 'error', name, message: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('fs:writeFile', async (_, path: string, content: string): Promise<WriteResult> => {
+  try {
+    await writeFile(path, content, 'utf8')
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 })
 

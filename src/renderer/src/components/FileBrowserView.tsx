@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useFileBrowser } from '../store/fileBrowser'
-import { FilePreview } from './FilePreview'
 import type { DirEntry, FilePreview as Preview } from '../../../shared/types'
+
+// Code-split: the editor pulls in all the CodeMirror language packs, so load it
+// only when a file is actually previewed.
+const FilePreview = lazy(() => import('./FilePreview').then(m => ({ default: m.FilePreview })))
 
 interface Props {
   sessionId: string
@@ -96,14 +99,18 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
       </div>
 
       {preview && (
-        <FilePreview
-          preview={preview.data}
-          onClose={() => setPreview(null)}
-          onOpenExternal={() => {
-            window.api.shell.openPath(preview.path)
-            setPreview(null)
-          }}
-        />
+        <Suspense fallback={null}>
+          <FilePreview
+            key={preview.path}
+            preview={preview.data}
+            path={preview.path}
+            onClose={() => setPreview(null)}
+            onOpenExternal={() => {
+              window.api.shell.openPath(preview.path)
+              setPreview(null)
+            }}
+          />
+        </Suspense>
       )}
     </div>
   )

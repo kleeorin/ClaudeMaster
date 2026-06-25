@@ -26,3 +26,5 @@ export type FilePreview =
   | { kind: 'text'; name: string; text: string; truncated: boolean }
   | { kind: 'binary'; name: string }
   | { kind: 'error'; name: string; message: string }
+
+export type WriteResult = { ok: true } | { ok: false; error: string }
