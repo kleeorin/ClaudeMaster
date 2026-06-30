@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTerminal, CONTAINER_STYLE } from '../hooks/useTerminal'
 import { JumpToBottom } from './JumpToBottom'
-import { useSessions } from '../store/sessions'
 
 interface Props {
   sessionId: string
@@ -9,7 +8,6 @@ interface Props {
 }
 
 export function TerminalView({ sessionId, isActive }: Props) {
-  const { savedScrollback } = useSessions()
   const containerRef = useRef<HTMLDivElement>(null)
   const [atBottom, setAtBottom] = useState(true)
   const { fitRef, focus, scrollToBottom } = useTerminal(containerRef, {
@@ -17,7 +15,7 @@ export function TerminalView({ sessionId, isActive }: Props) {
     sendResize: (cols, rows) => window.api.session.resize(sessionId, cols, rows),
     subscribeOutput: (cb) =>
       window.api.on.output((id, data) => { if (id === sessionId) cb(data) }),
-  }, { sessionId, initialOutput: savedScrollback[sessionId], onAtBottomChange: setAtBottom })
+  }, { onAtBottomChange: setAtBottom })
 
   // Two rAFs: switching from display:none needs two frames for layout to settle.
   // Focus the terminal so keyboard input (including spacebar) works immediately.

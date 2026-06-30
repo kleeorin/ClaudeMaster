@@ -52,6 +52,38 @@ Verify it works:
 claude --version
 ```
 
+### 4. Jupyter (only for the notebook feature)
+
+Opening or creating a `.ipynb` from the file browser starts a Jupyter kernel.
+ClaudeMaster launches the server with the `python3` on your `PATH`
+(`python3 -m jupyter server`), so Jupyter must be installed for that `python3`:
+
+```bash
+python3 -m pip install jupyter-server notebook ipykernel
+```
+
+If it's missing, the notebook panel shows "kernel unavailable" with an
+**Install jupyter & retry** button that runs the command above for you.
+
+**Kernels / environments.** The kernel dropdown in a notebook's header lists
+whatever kernelspecs are *globally registered* on the machine
+(`jupyter kernelspec list`) — ClaudeMaster does **not** install or modify any.
+These specs live in a shared directory (`~/.local/share/jupyter/kernels`), so the
+same list appears in every Jupyter frontend (JupyterLab, classic Notebook, etc.),
+not just this app. Each kernel is started in the notebook's own directory (or a
+directory you pick via **Custom directory…**), so per-project virtualenvs resolve
+correctly.
+
+If present, ClaudeMaster defaults a notebook to a kernelspec named
+`python-autovenv` (a user-provided launcher that picks the nearest venv); install
+your own with that name to opt in, otherwise it falls back to the default
+`python3` kernel. Register a venv as a selectable kernel with:
+
+```bash
+/path/to/venv/bin/python -m ipykernel install --user --name myproj \
+  --display-name "Python (myproj)"
+```
+
 ## Installation
 
 ```bash
@@ -149,3 +181,11 @@ On some Linux systems (e.g. without user namespaces enabled) Electron's sandbox 
 **`claude: command not found`** — ensure `@anthropic-ai/claude-code` is installed globally and that your `PATH` is set correctly in your shell profile (`.bashrc`, `.zshrc`, etc.).
 
 **Blank window on Linux** — try running with `--no-sandbox` (see above).
+
+**Notebook says "kernel unavailable"** — Jupyter isn't installed for the `python3`
+on your `PATH`. Install it (`python3 -m pip install jupyter-server notebook ipykernel`)
+or use the **Install jupyter & retry** button, then reopen the notebook.
+
+**Wrong / missing kernel in the dropdown** — the list comes from
+`jupyter kernelspec list` (globally registered specs), not from ClaudeMaster.
+Add one with `python -m ipykernel install --user --name … --display-name …`.

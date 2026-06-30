@@ -15,7 +15,7 @@ export class KernelClient {
   constructor(
     private baseUrl: string,
     private token: string,
-    private kernelId: string,
+    readonly kernelId: string,
   ) {}
 
   connect(): Promise<void> {
@@ -85,6 +85,15 @@ export class KernelClient {
       method: 'POST',
       headers: { Authorization: `token ${this.token}` },
     }).then(() => undefined)
+  }
+
+  // Ask the server to shut the kernel down (best-effort). Use before dispose()
+  // when permanently discarding a kernel, e.g. switching to another kernelspec.
+  shutdown(): Promise<void> {
+    return fetch(`${this.baseUrl}/api/kernels/${this.kernelId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `token ${this.token}` },
+    }).then(() => undefined).catch(() => undefined)
   }
 
   dispose(): void {

@@ -28,6 +28,14 @@ export class JupyterManager {
         '--ip=127.0.0.1',
         `--ServerApp.token=${token}`,
         '--ServerApp.disable_check_xsrf=True',
+        // The renderer fetches the kernel API from its own origin, so Jupyter
+        // must answer CORS preflight requests; without this the browser blocks
+        // the kernel-create fetch. Safe: bound to 127.0.0.1 and token-gated.
+        '--ServerApp.allow_origin=*',
+        // Root at "/" so a kernel can be started in any notebook's directory
+        // (passed as a path relative to root_dir) — this sets the kernel cwd,
+        // which the auto-venv kernel walks up from to find the nearest venv.
+        '--ServerApp.root_dir=/',
       ], { env: process.env as Record<string, string> })
 
       this.server = proc

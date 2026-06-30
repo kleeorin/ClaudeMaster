@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { appendScrollback } from '../lib/scrollbackStore'
 import { terminalRegistry } from '../lib/terminalRegistry'
 
 export const CONTAINER_STYLE = { padding: '6px' } as const
@@ -48,8 +47,6 @@ export interface TerminalAPI {
 }
 
 interface TerminalOptions {
-  sessionId?: string
-  initialOutput?: string
   /** Called whenever the viewport moves to / away from the bottom of the buffer. */
   onAtBottomChange?: (atBottom: boolean) => void
 }
@@ -78,7 +75,6 @@ export function useTerminal(
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
-    if (options.initialOutput) term.write(options.initialOutput)
     const rafId = requestAnimationFrame(() => fit.fit())
     fitRef.current = fit
     termRef.current = term
@@ -106,9 +102,7 @@ export function useTerminal(
     })
     ro.observe(el)
 
-    const { sessionId } = options
     const offOutput = apiRef.current.subscribeOutput((data) => {
-      if (sessionId) appendScrollback(sessionId, data)
       // The write callback fires after the buffer is parsed, so bottom-state
       // reflects any new lines this output added.
       term.write(data, reportAtBottom)

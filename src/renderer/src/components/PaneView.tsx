@@ -5,10 +5,9 @@ import { JumpToBottom } from './JumpToBottom'
 interface Props {
   paneId: string
   isActive: boolean
-  initialOutput?: string
 }
 
-export function PaneView({ paneId, isActive, initialOutput }: Props) {
+export function PaneView({ paneId, isActive }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [atBottom, setAtBottom] = useState(true)
   const { fitRef, focus, scrollToBottom } = useTerminal(containerRef, {
@@ -16,7 +15,7 @@ export function PaneView({ paneId, isActive, initialOutput }: Props) {
     sendResize: (cols, rows) => window.api.pane.resize(paneId, cols, rows),
     subscribeOutput: (cb) =>
       window.api.on.paneOutput((id, data) => { if (id === paneId) cb(data) }),
-  }, { sessionId: paneId, initialOutput, onAtBottomChange: setAtBottom })
+  }, { onAtBottomChange: setAtBottom })
 
   useEffect(() => {
     if (!isActive) return

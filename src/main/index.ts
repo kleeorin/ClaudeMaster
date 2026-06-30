@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
-import { join, extname, basename } from 'path'
+import { join, extname, basename, dirname } from 'path'
 import { homedir } from 'os'
-import { readdir, readFile, writeFile, stat } from 'fs/promises'
+import { readdir, readFile, writeFile, stat, cp, rename, rm, access, mkdir } from 'fs/promises'
 import type { DirEntry, FilePreview, WriteResult } from '../shared/types'
 import { SessionManager } from './sessionManager'
 import { PaneManager } from './paneManager'
@@ -27,6 +27,7 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
+      plugins: true,  // enable Chromium's built-in PDF viewer (FileView iframe)
     },
   })
 
@@ -66,8 +67,8 @@ function createWindow(): void {
   }
 }
 
-ipcMain.handle('session:create', (_, name: string, cwd: string) =>
-  sessions.create(name, cwd)
+ipcMain.handle('session:create', (_, name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean) =>
+  sessions.create(name, cwd, rootDir ?? cwd, parentId, resume)
 )
 ipcMain.handle('session:destroy', (_, id: string) => sessions.destroy(id))
 ipcMain.handle('session:list', () => sessions.list())
@@ -92,18 +93,99 @@ ipcMain.on('pane:resize', (_, id: string, cols: number, rows: number) => panes.r
 ipcMain.handle('fs:readDir', async (_, path: string): Promise<DirEntry[]> => {
   try {
     const entries = await readdir(path, { withFileTypes: true })
-    return entries
-      .map((e) => ({ name: e.name, isDir: e.isDirectory() }))
-      .sort((a, b) =>
-        a.isDir !== b.isDir
-          ? a.isDir ? -1 : 1
-          : a.name.localeCompare(b.name)
-      )
+    const detailed = await Promise.all(
+      entries.map(async (e) => {
+        // stat for size/mtime; tolerate unreadable entries (broken symlinks, perms).
+        let size = 0, mtimeMs = 0
+        try { const s = await stat(join(path, e.name)); size = s.size; mtimeMs = s.mtimeMs } catch { /* leave 0 */ }
+        return { name: e.name, isDir: e.isDirectory(), size, mtimeMs }
+      })
+    )
+    // Default order (folders first, by name); the renderer re-sorts on demand.
+    return detailed.sort((a, b) =>
+      a.isDir !== b.isDir
+        ? a.isDir ? -1 : 1
+        : a.name.localeCompare(b.name)
+    )
   } catch {
     return []
   }
 })
 ipcMain.handle('shell:openPath', (_, path: string) => shell.openPath(path))
+
+const errMsg = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
+// Pick a destination path in destDir that doesn't already exist, appending
+// " (1)", " (2)", … before the extension on collision — like a file manager.
+async function uniqueDest(destDir: string, name: string): Promise<string> {
+  const exists = async (p: string) => { try { await access(p); return true } catch { return false } }
+  if (!(await exists(join(destDir, name)))) return join(destDir, name)
+  const ext = extname(name)
+  const stem = name.slice(0, name.length - ext.length)
+  for (let i = 1; ; i++) {
+    const candidate = join(destDir, `${stem} (${i})${ext}`)
+    if (!(await exists(candidate))) return candidate
+  }
+}
+
+// Copy a file/dir (recursively) into destDir, never overwriting.
+ipcMain.handle('fs:copy', async (_, src: string, destDir: string): Promise<WriteResult> => {
+  try {
+    await cp(src, await uniqueDest(destDir, basename(src)), { recursive: true })
+    return { ok: true }
+  } catch (err) { return { ok: false, error: errMsg(err) } }
+})
+
+// Move a file/dir into destDir. rename() is atomic on the same filesystem; fall
+// back to copy+remove across devices.
+ipcMain.handle('fs:move', async (_, src: string, destDir: string): Promise<WriteResult> => {
+  try {
+    const dest = await uniqueDest(destDir, basename(src))
+    try {
+      await rename(src, dest)
+    } catch {
+      await cp(src, dest, { recursive: true })
+      await rm(src, { recursive: true, force: true })
+    }
+    return { ok: true }
+  } catch (err) { return { ok: false, error: errMsg(err) } }
+})
+
+// Delete to the OS trash (recoverable) rather than an irreversible unlink.
+ipcMain.handle('fs:delete', async (_, path: string): Promise<WriteResult> => {
+  try {
+    await shell.trashItem(path)
+    return { ok: true }
+  } catch (err) { return { ok: false, error: errMsg(err) } }
+})
+
+// Rename within the same directory; refuse to clobber an existing name.
+ipcMain.handle('fs:rename', async (_, path: string, newName: string): Promise<WriteResult> => {
+  try {
+    const dest = join(dirname(path), newName)
+    if (dest === path) return { ok: true }
+    try { await access(dest); return { ok: false, error: 'A file with that name already exists' } }
+    catch { /* name is free */ }
+    await rename(path, dest)
+    return { ok: true }
+  } catch (err) { return { ok: false, error: errMsg(err) } }
+})
+
+// Create a new (empty) directory; non-recursive so it fails if it already exists.
+ipcMain.handle('fs:mkdir', async (_, path: string): Promise<WriteResult> => {
+  try {
+    await mkdir(path)
+    return { ok: true }
+  } catch (err) { return { ok: false, error: errMsg(err) } }
+})
+
+// Create a new empty file; 'wx' fails rather than truncate an existing file.
+ipcMain.handle('fs:createFile', async (_, path: string): Promise<WriteResult> => {
+  try {
+    await writeFile(path, '', { flag: 'wx' })
+    return { ok: true }
+  } catch (err) { return { ok: false, error: errMsg(err) } }
+})
 
 const IMAGE_MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -128,6 +210,12 @@ ipcMain.handle('fs:readFile', async (_, path: string): Promise<FilePreview> => {
       return { kind: 'image', name, dataUrl: `data:${mime};base64,${buf.toString('base64')}` }
     }
 
+    // Render PDFs inline via Chromium's built-in viewer (travels over VNC).
+    if (ext === '.pdf') {
+      const buf = await readFile(path)
+      return { kind: 'pdf', name, dataUrl: `data:application/pdf;base64,${buf.toString('base64')}` }
+    }
+
     const { size } = await stat(path)
     const buf = await readFile(path)
     // Binary heuristic: a NUL byte in the first chunk means "not text".
@@ -138,6 +226,17 @@ ipcMain.handle('fs:readFile', async (_, path: string): Promise<FilePreview> => {
     return { kind: 'text', name, text, truncated }
   } catch (err) {
     return { kind: 'error', name, message: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// Full, untruncated UTF-8 read — used for .ipynb so notebooks round-trip without
+// the size cap / binary heuristic that fs:readFile applies for previews.
+ipcMain.handle('fs:readText', async (_, path: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> => {
+  try {
+    const text = await readFile(path, 'utf8')
+    return { ok: true, text }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 })
 
@@ -153,11 +252,11 @@ ipcMain.handle('fs:writeFile', async (_, path: string, content: string): Promise
 ipcMain.handle('jupyter:start', () => jupyter.start())
 ipcMain.handle('jupyter:install', () => jupyter.install())
 
-ipcMain.handle('dialog:openDir', async () => {
+ipcMain.handle('dialog:openDir', async (_, defaultPath?: string) => {
   if (!mainWindow) return null
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory'],
-    defaultPath: homedir(),
+    defaultPath: defaultPath || homedir(),
   })
   return result.canceled ? null : result.filePaths[0]
 })

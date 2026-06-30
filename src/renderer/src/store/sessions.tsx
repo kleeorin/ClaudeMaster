@@ -7,21 +7,31 @@ import {
   useRef,
   type ReactNode,
 } from 'react'
-import type { SessionInfo, SessionState } from '../../../shared/types'
-import { getScrollback } from '../lib/scrollbackStore'
+import type { SessionInfo, SessionState, SavedSession } from '../../../shared/types'
+
+// Flatten the live sessions into the persisted shape. Parent links survive as an
+// index into this array (ids are regenerated on restore); a subsession always
+// follows its parent, so the index is always already known on the way back in.
+function serialize(sessions: SessionInfo[], panes: Record<string, string>): SavedSession[] {
+  return sessions.map((s) => ({
+    name: s.name,
+    cwd: s.cwd,
+    rootDir: s.rootDir,
+    parentIndex: s.parentId ? sessions.findIndex((p) => p.id === s.parentId) : undefined,
+    hasPane: !!panes[s.id],
+  }))
+}
 
 interface State {
   sessions: SessionInfo[]
   activeId: string | null
   panes: Record<string, string>            // sessionId → paneId (persists when hidden)
   paneVisible: Record<string, boolean>     // sessionId → shown
-  savedScrollback: Record<string, string>  // sessionId → initial scrollback
-  savedPaneScrollback: Record<string, string> // sessionId → initial pane scrollback
 }
 
 type Action =
   | { type: 'LOAD'; sessions: SessionInfo[] }
-  | { type: 'ADD'; session: SessionInfo; scrollback?: string; paneId?: string; paneScrollback?: string }
+  | { type: 'ADD'; session: SessionInfo; paneId?: string }
   | { type: 'REMOVE'; id: string }
   | { type: 'STATE_CHANGE'; id: string; state: SessionState }
   | { type: 'SET_ACTIVE'; id: string }
@@ -41,20 +51,12 @@ function reducer(state: State, action: Action): State {
       const newPaneVisible = action.paneId
         ? { ...(state.paneVisible ?? {}), [action.session.id]: true }
         : (state.paneVisible ?? {})
-      const newSavedPaneScrollback = action.paneScrollback !== undefined
-        ? { ...(state.savedPaneScrollback ?? {}), [action.session.id]: action.paneScrollback }
-        : (state.savedPaneScrollback ?? {})
       return {
         ...state,
         sessions: [...state.sessions, action.session],
         activeId: action.session.id,
         panes: newPanes,
         paneVisible: newPaneVisible,
-        savedScrollback: {
-          ...(state.savedScrollback ?? {}),
-          [action.session.id]: action.scrollback ?? '',
-        },
-        savedPaneScrollback: newSavedPaneScrollback,
       }
     }
     case 'REMOVE': {
@@ -65,11 +67,7 @@ function reducer(state: State, action: Action): State {
       delete panes[action.id]
       const paneVisible = { ...(state.paneVisible ?? {}) }
       delete paneVisible[action.id]
-      const savedScrollback = { ...(state.savedScrollback ?? {}) }
-      delete savedScrollback[action.id]
-      const savedPaneScrollback = { ...(state.savedPaneScrollback ?? {}) }
-      delete savedPaneScrollback[action.id]
-      return { sessions, activeId, panes, paneVisible, savedScrollback, savedPaneScrollback }
+      return { sessions, activeId, panes, paneVisible }
     }
     case 'STATE_CHANGE':
       return {
@@ -109,6 +107,7 @@ function reducer(state: State, action: Action): State {
 
 interface ContextValue extends State {
   createSession: () => Promise<void>
+  addSubsession: (parentId: string) => Promise<void>
   closeSession: (id: string) => Promise<void>
   setActive: (id: string) => void
   openPane: (sessionId: string) => Promise<void>
@@ -121,7 +120,7 @@ const SessionContext = createContext<ContextValue | null>(null)
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, {
-    sessions: [], activeId: null, panes: {}, paneVisible: {}, savedScrollback: {}, savedPaneScrollback: {},
+    sessions: [], activeId: null, panes: {}, paneVisible: {},
   })
 
   // Keep a ref so event handlers always see fresh state
@@ -141,20 +140,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // Fresh start: restore previously saved sessions
         const saved = await window.api.session.loadSaved()
         if (cancelled) return
-        for (const s of saved) {
-          const id = await window.api.session.create(s.name, s.cwd)
+        const idByIndex: string[] = []  // map a saved index → its new live id (for parent links)
+        for (let i = 0; i < saved.length; i++) {
+          const s = saved[i]
+          const rootDir = s.rootDir ?? s.cwd
+          const parentId = s.parentIndex != null ? idByIndex[s.parentIndex] : undefined
+          // Resume the last conversation in this folder via Claude's own renderer.
+          const id = await window.api.session.create(s.name, s.cwd, rootDir, parentId, true)
           if (cancelled) return
+          idByIndex[i] = id
           let paneId: string | undefined
-          if (s.paneScrollback !== undefined) {
-            paneId = await window.api.pane.create(s.cwd)
+          if (s.hasPane) {
+            paneId = await window.api.pane.create(rootDir)
             if (cancelled) return
           }
           dispatch({
             type: 'ADD',
-            session: { id, name: s.name, cwd: s.cwd, state: 'idle' },
-            scrollback: s.scrollback,
+            session: { id, name: s.name, cwd: s.cwd, rootDir, parentId, state: 'idle' },
             paneId,
-            paneScrollback: s.paneScrollback,
           })
         }
       }
@@ -171,14 +174,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'CLEAR_PANE', paneId })
     })
     const offRequestSave = window.api.on.requestSave(async () => {
-      const saved = stateRef.current.sessions.map((s) => ({
-        name: s.name,
-        cwd: s.cwd,
-        scrollback: getScrollback(s.id),
-        paneScrollback: stateRef.current.panes[s.id]
-          ? getScrollback(stateRef.current.panes[s.id])
-          : undefined,
-      }))
+      const saved = serialize(stateRef.current.sessions, stateRef.current.panes)
       await window.api.session.saveState(saved)
     })
 
@@ -195,28 +191,42 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const cwd = await window.api.dialog.openDir()
     if (!cwd) return
     const name = cwd.split('/').pop() || 'Session'
-    const id = await window.api.session.create(name, cwd)
-    dispatch({ type: 'ADD', session: { id, name, cwd, state: 'idle' } })
+    const id = await window.api.session.create(name, cwd, cwd)
+    dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, state: 'idle' } })
+  }, [])
+
+  // A subsession runs its own Claude in the parent's directory, but scopes its
+  // terminal pane and file browser to a chosen subdirectory of that directory.
+  const addSubsession = useCallback(async (parentId: string) => {
+    const parent = stateRef.current.sessions.find((s) => s.id === parentId)
+    if (!parent) return
+    const rootDir = await window.api.dialog.openDir(parent.cwd)
+    if (!rootDir) return
+    const name = rootDir.split('/').pop() || 'Subsession'
+    const id = await window.api.session.create(name, parent.cwd, rootDir, parentId)
+    dispatch({
+      type: 'ADD',
+      session: { id, name, cwd: parent.cwd, rootDir, parentId, state: 'idle' },
+    })
   }, [])
 
   const closeSession = useCallback(async (id: string) => {
-    const paneId = stateRef.current.panes[id]
-    if (paneId) await window.api.pane.destroy(paneId)
-    await window.api.session.destroy(id)
-    dispatch({ type: 'REMOVE', id })
+    // Closing a session also closes any subsessions hanging off it.
+    const toClose = stateRef.current.sessions
+      .filter((s) => s.id === id || s.parentId === id)
+      .map((s) => s.id)
+
+    for (const sid of toClose) {
+      const paneId = stateRef.current.panes[sid]
+      if (paneId) await window.api.pane.destroy(paneId)
+      await window.api.session.destroy(sid)
+      dispatch({ type: 'REMOVE', id: sid })
+    }
 
     // Auto-save remaining sessions so state survives crashes and hot-reloads
-    const remaining = stateRef.current.sessions
-      .filter((s) => s.id !== id)
-      .map((s) => ({
-        name: s.name,
-        cwd: s.cwd,
-        scrollback: getScrollback(s.id),
-        paneScrollback: stateRef.current.panes[s.id]
-          ? getScrollback(stateRef.current.panes[s.id])
-          : undefined,
-      }))
-    await window.api.session.autosave(remaining)
+    const closed = new Set(toClose)
+    const remaining = stateRef.current.sessions.filter((s) => !closed.has(s.id))
+    await window.api.session.autosave(serialize(remaining, stateRef.current.panes))
   }, [])
 
   const setActive = useCallback((id: string) => {
@@ -230,7 +240,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
     const session = stateRef.current.sessions.find((s) => s.id === sessionId)
     if (!session) return
-    const paneId = await window.api.pane.create(session.cwd)
+    const paneId = await window.api.pane.create(session.rootDir)
     dispatch({ type: 'SET_PANE', sessionId, paneId })
   }, [])
 
@@ -248,7 +258,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   return (
     <SessionContext.Provider value={{
-      ...state, createSession, closeSession, setActive,
+      ...state, createSession, addSubsession, closeSession, setActive,
       openPane, closePane, paneFor, paneIdFor,
     }}>
       {children}

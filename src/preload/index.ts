@@ -1,10 +1,10 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult } from '../shared/types'
 
 contextBridge.exposeInMainWorld('api', {
   session: {
-    create: (name: string, cwd: string): Promise<string> =>
-      ipcRenderer.invoke('session:create', name, cwd),
+    create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean): Promise<string> =>
+      ipcRenderer.invoke('session:create', name, cwd, rootDir, parentId, resume),
     destroy: (id: string): Promise<void> =>
       ipcRenderer.invoke('session:destroy', id),
     list: (): Promise<SessionInfo[]> =>
@@ -31,16 +31,32 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.send('pane:resize', id, cols, rows),
   },
   dialog: {
-    openDir: (): Promise<string | null> =>
-      ipcRenderer.invoke('dialog:openDir'),
+    openDir: (defaultPath?: string): Promise<string | null> =>
+      ipcRenderer.invoke('dialog:openDir', defaultPath),
   },
   fs: {
     readDir: (path: string): Promise<DirEntry[]> =>
       ipcRenderer.invoke('fs:readDir', path),
     readFile: (path: string): Promise<FilePreview> =>
       ipcRenderer.invoke('fs:readFile', path),
+    readText: (path: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke('fs:readText', path),
     writeFile: (path: string, content: string): Promise<WriteResult> =>
       ipcRenderer.invoke('fs:writeFile', path, content),
+    copy: (src: string, destDir: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('fs:copy', src, destDir),
+    move: (src: string, destDir: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('fs:move', src, destDir),
+    delete: (path: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('fs:delete', path),
+    rename: (path: string, newName: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('fs:rename', path, newName),
+    mkdir: (path: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('fs:mkdir', path),
+    createFile: (path: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('fs:createFile', path),
+    // Resolve the absolute path of a dropped File (for drag-in from the OS).
+    pathForFile: (file: File): string => webUtils.getPathForFile(file),
   },
   shell: {
     openPath: (path: string): Promise<string> =>

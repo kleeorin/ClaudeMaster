@@ -18,10 +18,13 @@ export class SessionManager extends EventEmitter {
   private sessions = new Map<string, Session>()
   private idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  create(name: string, cwd: string): string {
+  create(name: string, cwd: string, rootDir = cwd, parentId?: string, resume = false): string {
     const id = crypto.randomUUID()
 
-    const ptyProcess = pty.spawn('claude', [], {
+    // Restored sessions resume their last conversation in this folder via
+    // Claude's own renderer; fresh sessions start clean. Claude always runs in
+    // `cwd` — a subsession shares its parent's cwd, only `rootDir` differs.
+    const ptyProcess = pty.spawn('claude', resume ? ['--continue'] : [], {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
@@ -29,7 +32,7 @@ export class SessionManager extends EventEmitter {
       env: process.env as Record<string, string>,
     })
 
-    const session: Session = { id, name, cwd, state: 'idle', pty: ptyProcess }
+    const session: Session = { id, name, cwd, rootDir, parentId, state: 'idle', pty: ptyProcess }
     this.sessions.set(id, session)
 
     ptyProcess.onData((data) => {
@@ -68,8 +71,8 @@ export class SessionManager extends EventEmitter {
   }
 
   list(): SessionInfo[] {
-    return Array.from(this.sessions.values()).map(({ id, name, cwd, state }) => ({
-      id, name, cwd, state,
+    return Array.from(this.sessions.values()).map(({ id, name, cwd, rootDir, parentId, state }) => ({
+      id, name, cwd, rootDir, parentId, state,
     }))
   }
 

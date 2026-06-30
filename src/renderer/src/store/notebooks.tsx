@@ -1,79 +1,145 @@
-import { createContext, useContext, useReducer, useCallback, useEffect, type ReactNode } from 'react'
+import { createContext, useContext, useReducer, useCallback, useRef, useState, type ReactNode } from 'react'
 import { KernelClient, type CellOutput, type KernelStatus } from '../lib/kernelClient'
+import { parseNotebook, serializeNotebook, type NotebookMeta } from '../lib/ipynb'
+import { remapPath } from '../lib/paths'
+import type { WriteResult } from '../../../shared/types'
+
+export type CellType = 'code' | 'markdown' | 'raw'
 
 export interface Cell {
   id: string
+  type: CellType
   code: string
   outputs: CellOutput[]
   executionCount: number | null
   running: boolean
+  metadata: Record<string, unknown>
 }
 
-interface SessionNotebook {
+export interface KernelSpecInfo {
+  name: string
+  displayName: string
+  language: string
+}
+
+// Preferred kernel when a notebook doesn't pin one: the auto-venv kernel resolves
+// the nearest venv to the notebook's directory.
+const PREFERRED_KERNEL = 'python-autovenv'
+
+// Notebooks are keyed by their file path (not by session): opening the same
+// notebook again reuses its loaded cells and attached kernel.
+interface Notebook {
+  path: string
   cells: Cell[]
+  meta: NotebookMeta
   kernelStatus: KernelStatus | null
-  open: boolean
+  kernelName: string | null  // kernelspec the running kernel was started from
+  kernelCwd: string | null   // override dir for the kernel (custom env); null = notebook's dir
+  dirty: boolean
 }
 
-type State = Record<string, SessionNotebook>
+type State = Record<string, Notebook>
 
 type Action =
-  | { type: 'OPEN'; sessionId: string }
-  | { type: 'CLOSE'; sessionId: string }
-  | { type: 'DESTROY'; sessionId: string }
-  | { type: 'SET_STATUS'; sessionId: string; status: KernelStatus }
-  | { type: 'ADD_CELL'; sessionId: string; cell: Cell }
-  | { type: 'REMOVE_CELL'; sessionId: string; cellId: string }
-  | { type: 'UPDATE_CODE'; sessionId: string; cellId: string; code: string }
-  | { type: 'SET_RUNNING'; sessionId: string; cellId: string; running: boolean }
-  | { type: 'ADD_OUTPUT'; sessionId: string; cellId: string; output: CellOutput }
-  | { type: 'SET_EXEC_COUNT'; sessionId: string; cellId: string; count: number }
-  | { type: 'CLEAR_OUTPUTS'; sessionId: string; cellId: string }
+  | { type: 'LOAD'; path: string; cells: Cell[]; meta: NotebookMeta }
+  | { type: 'SET_STATUS'; path: string; status: KernelStatus }
+  | { type: 'SET_KERNEL_NAME'; path: string; name: string }
+  | { type: 'SET_KERNELSPEC_META'; path: string; kernelspec: Record<string, unknown> }
+  | { type: 'SET_KERNEL_CWD'; path: string; cwd: string | null }
+  | { type: 'MARK_CLEAN'; path: string }
+  | { type: 'ADD_CELL'; path: string; cell: Cell }
+  | { type: 'INSERT_CELL'; path: string; index: number; cell: Cell }
+  | { type: 'MOVE_CELL'; path: string; from: number; to: number }
+  | { type: 'SET_CELL_TYPE'; path: string; cellId: string; cellType: CellType }
+  | { type: 'REMOVE_CELL'; path: string; cellId: string }
+  | { type: 'UPDATE_CODE'; path: string; cellId: string; code: string }
+  | { type: 'SET_RUNNING'; path: string; cellId: string; running: boolean }
+  | { type: 'ADD_OUTPUT'; path: string; cellId: string; output: CellOutput }
+  | { type: 'SET_EXEC_COUNT'; path: string; cellId: string; count: number }
+  | { type: 'CLEAR_OUTPUTS'; path: string; cellId: string }
+  | { type: 'RENAME'; from: string; to: string }
 
-function defaultNotebook(): SessionNotebook {
-  return { cells: [newCell()], kernelStatus: null, open: false }
-}
-
-function newCell(): Cell {
-  return { id: crypto.randomUUID(), code: '', outputs: [], executionCount: null, running: false }
+function newCell(type: CellType = 'code'): Cell {
+  return { id: crypto.randomUUID(), type, code: '', outputs: [], executionCount: null, running: false, metadata: {} }
 }
 
 function reducer(state: State, action: Action): State {
-  const nb = state[action.sessionId]
-  const patch = (s: SessionNotebook) => ({ ...state, [action.sessionId]: s })
+  // RENAME re-keys the whole map and has no single `path`; the rest are per-path.
+  const path = 'path' in action ? action.path : ''
+  const nb = state[path]
+  // Patch + mark dirty (content changed). LOAD/SET_STATUS/SET_KERNEL_NAME/MARK_CLEAN manage `dirty` themselves.
+  const dirtyPatch = (s: Notebook) => ({ ...state, [path]: { ...s, dirty: true } })
 
   switch (action.type) {
-    case 'OPEN':
-      return patch({ ...(nb ?? defaultNotebook()), open: true, kernelStatus: 'starting' })
-    case 'CLOSE':
-      return nb ? patch({ ...nb, open: false }) : state
-    case 'DESTROY': {
-      const next = { ...state }
-      delete next[action.sessionId]
-      return next
+    case 'LOAD': {
+      const savedDir = action.meta.metadata?.autovenv_dir
+      return { ...state, [action.path]: { path: action.path, cells: action.cells, meta: action.meta, kernelStatus: nb?.kernelStatus ?? null, kernelName: nb?.kernelName ?? null, kernelCwd: typeof savedDir === 'string' ? savedDir : null, dirty: false } }
     }
     case 'SET_STATUS':
-      return nb ? patch({ ...nb, kernelStatus: action.status }) : state
+      return nb ? { ...state, [action.path]: { ...nb, kernelStatus: action.status } } : state
+    case 'SET_KERNEL_NAME':
+      return nb ? { ...state, [action.path]: { ...nb, kernelName: action.name } } : state
+    case 'SET_KERNELSPEC_META':
+      return nb ? dirtyPatch({ ...nb, meta: { ...nb.meta, metadata: { ...nb.meta.metadata, kernelspec: action.kernelspec } } }) : state
+    case 'SET_KERNEL_CWD': {
+      if (!nb) return state
+      const metadata = { ...nb.meta.metadata }
+      if (action.cwd) metadata.autovenv_dir = action.cwd
+      else delete metadata.autovenv_dir
+      return dirtyPatch({ ...nb, kernelCwd: action.cwd, meta: { ...nb.meta, metadata } })
+    }
+    case 'MARK_CLEAN':
+      return nb ? { ...state, [action.path]: { ...nb, dirty: false } } : state
     case 'ADD_CELL':
-      return nb ? patch({ ...nb, cells: [...nb.cells, action.cell] }) : state
+      return nb ? dirtyPatch({ ...nb, cells: [...nb.cells, action.cell] }) : state
+    case 'INSERT_CELL': {
+      if (!nb) return state
+      const cells = [...nb.cells]
+      cells.splice(Math.max(0, Math.min(action.index, cells.length)), 0, action.cell)
+      return dirtyPatch({ ...nb, cells })
+    }
+    case 'MOVE_CELL': {
+      if (!nb) return state
+      const { from, to } = action
+      if (from === to || from < 0 || to < 0 || from >= nb.cells.length || to >= nb.cells.length) return state
+      const cells = [...nb.cells]
+      const [moved] = cells.splice(from, 1)
+      cells.splice(to, 0, moved)
+      return dirtyPatch({ ...nb, cells })
+    }
+    case 'SET_CELL_TYPE':
+      return nb ? dirtyPatch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, type: action.cellType, outputs: [], executionCount: null } : c) }) : state
     case 'REMOVE_CELL':
-      return nb ? patch({ ...nb, cells: nb.cells.filter((c) => c.id !== action.cellId) }) : state
+      return nb ? dirtyPatch({ ...nb, cells: nb.cells.filter((c) => c.id !== action.cellId) }) : state
     case 'UPDATE_CODE':
-      return nb ? patch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, code: action.code } : c) }) : state
+      return nb ? dirtyPatch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, code: action.code } : c) }) : state
     case 'SET_RUNNING':
-      return nb ? patch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, running: action.running } : c) }) : state
+      // Running state is transient UI, not a content change — don't mark dirty.
+      return nb ? { ...state, [action.path]: { ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, running: action.running } : c) } } : state
     case 'ADD_OUTPUT':
-      return nb ? patch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, outputs: [...c.outputs, action.output] } : c) }) : state
+      return nb ? dirtyPatch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, outputs: [...c.outputs, action.output] } : c) }) : state
     case 'SET_EXEC_COUNT':
-      return nb ? patch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, executionCount: action.count } : c) }) : state
+      return nb ? dirtyPatch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, executionCount: action.count } : c) }) : state
     case 'CLEAR_OUTPUTS':
-      return nb ? patch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, outputs: [], executionCount: null } : c) }) : state
+      return nb ? dirtyPatch({ ...nb, cells: nb.cells.map((c) => c.id === action.cellId ? { ...c, outputs: [], executionCount: null } : c) }) : state
+    case 'RENAME': {
+      // Re-key loaded notebooks at or under `from` so an open notebook follows a
+      // file/folder rename. Same-dir renames keep the kernel's cwd valid.
+      let changed = false
+      const next: State = {}
+      for (const [key, n] of Object.entries(state)) {
+        const nk = remapPath(key, action.from, action.to)
+        if (nk !== key) changed = true
+        next[nk] = nk === key ? n : { ...n, path: nk }
+      }
+      return changed ? next : state
+    }
     default:
       return state
   }
 }
 
-// Kernel clients live outside React state (not serializable)
+// Kernel clients live outside React state (not serializable), keyed by notebook path.
 const kernelClients = new Map<string, KernelClient>()
 let serverInfo: { url: string; token: string } | null = null
 
@@ -83,156 +149,317 @@ async function getServerInfo(): Promise<{ url: string; token: string } | null> {
   return serverInfo
 }
 
-async function createKernel(url: string, token: string): Promise<string> {
+interface Specs { default: string; list: KernelSpecInfo[] }
+let specsCache: Specs | null = null
+
+async function getSpecs(url: string, token: string): Promise<Specs> {
+  if (specsCache) return specsCache
+  const res = await fetch(`${url}/api/kernelspecs`, { headers: { Authorization: `token ${token}` } })
+  const data = await res.json()
+  const list: KernelSpecInfo[] = Object.values(data.kernelspecs ?? {}).map((k: any) => ({
+    name: k.name,
+    displayName: k.spec?.display_name ?? k.name,
+    language: k.spec?.language ?? '',
+  }))
+  specsCache = { default: data.default ?? 'python3', list }
+  return specsCache
+}
+
+// Kernel cwd is passed to the API as a path relative to root_dir ("/"), so strip
+// the leading slash. Uses `override` (custom env dir) when set, else the
+// notebook's own directory.
+function kernelCwdPath(notebookPath: string, override?: string | null): string {
+  const dir = override && override.length > 0
+    ? override
+    : (notebookPath.slice(0, notebookPath.lastIndexOf('/')) || '/')
+  return dir.replace(/^\/+/, '')
+}
+
+// Which kernelspec to start a notebook with: the one it pins in metadata (if still
+// available), otherwise the auto-venv kernel, otherwise the server default.
+function chooseSpec(meta: NotebookMeta | undefined, specs: Specs): string {
+  const names = new Set(specs.list.map((s) => s.name))
+  const pinned = (meta?.metadata?.kernelspec as { name?: string } | undefined)?.name
+  if (pinned && names.has(pinned)) return pinned
+  if (names.has(PREFERRED_KERNEL)) return PREFERRED_KERNEL
+  return specs.default
+}
+
+async function createKernel(url: string, token: string, name: string, path: string): Promise<string> {
   const res = await fetch(`${url}/api/kernels`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `token ${token}` },
-    body: JSON.stringify({ name: 'python3' }),
+    body: JSON.stringify({ name, path }),
   })
   const data = await res.json()
+  if (!data.id) throw new Error(data.message ?? 'kernel create failed')
   return data.id as string
-}
-
-async function destroyKernel(url: string, token: string, kernelId: string): Promise<void> {
-  await fetch(`${url}/api/kernels/${kernelId}`, {
-    method: 'DELETE',
-    headers: { Authorization: `token ${token}` },
-  })
 }
 
 interface ContextValue {
   notebooks: State
-  openNotebook: (sessionId: string) => Promise<void>
-  closeNotebook: (sessionId: string) => void
-  addCell: (sessionId: string) => void
-  removeCell: (sessionId: string, cellId: string) => void
-  updateCode: (sessionId: string, cellId: string, code: string) => void
-  executeCell: (sessionId: string, cellId: string) => void
-  clearOutputs: (sessionId: string, cellId: string) => void
-  interruptKernel: (sessionId: string) => void
-  restartKernel: (sessionId: string) => Promise<void>
-  installAndRetry: (sessionId: string) => Promise<void>
+  specs: KernelSpecInfo[]
+  openNotebook: (path: string) => Promise<void>
+  saveNotebook: (path: string) => Promise<WriteResult | undefined>
+  setKernel: (path: string, specName: string) => Promise<void>
+  setKernelDir: (path: string, dir: string) => Promise<void>
+  addCell: (path: string, type?: CellType) => void
+  insertCell: (path: string, type: CellType, index: number) => string
+  moveCell: (path: string, from: number, to: number) => void
+  setCellType: (path: string, cellId: string, type: CellType) => void
+  removeCell: (path: string, cellId: string) => void
+  updateCode: (path: string, cellId: string, code: string) => void
+  executeCell: (path: string, cellId: string) => void
+  runAll: (path: string) => Promise<void>
+  restartAndRunAll: (path: string) => Promise<void>
+  clearOutputs: (path: string, cellId: string) => void
+  clearAllOutputs: (path: string) => void
+  interruptKernel: (path: string) => void
+  restartKernel: (path: string) => Promise<void>
+  installAndRetry: (path: string) => Promise<void>
+  renamePath: (from: string, to: string) => void
 }
 
 const NotebookContext = createContext<ContextValue | null>(null)
 
 export function NotebookProvider({ children }: { children: ReactNode }) {
   const [notebooks, dispatch] = useReducer(reducer, {})
+  const [specs, setSpecs] = useState<KernelSpecInfo[]>([])
+  // Mirror of current state so callbacks read fresh data without re-creating.
+  const nbRef = useRef(notebooks)
+  nbRef.current = notebooks
 
-  // Clean up kernels when sessions exit
-  useEffect(() => {
-    const offExit = window.api.on.exit(async (id) => {
-      const client = kernelClients.get(id)
-      if (client) {
-        const info = serverInfo
-        // best-effort kernel cleanup
-        try { if (info) await destroyKernel(info.url, info.token, (client as unknown as { kernelId: string }).kernelId) } catch { /**/ }
-        client.dispose()
-        kernelClients.delete(id)
-      }
-      dispatch({ type: 'DESTROY', sessionId: id })
-    })
-    return offExit
-  }, [])
-
-  const openNotebook = useCallback(async (sessionId: string) => {
-    dispatch({ type: 'OPEN', sessionId })
-    if (kernelClients.has(sessionId)) {
-      // Already have a kernel — just re-open the panel
-      return
-    }
+  // Start a kernel for `path` from a specific spec, in `cwdOverride` (custom env
+  // dir) or the notebook's directory, and wire it up. Caller owns disposing any
+  // previous kernel and setting 'starting' status.
+  const startKernel = useCallback(async (path: string, specName: string, cwdOverride: string | null): Promise<boolean> => {
     try {
       const info = await getServerInfo()
       if (!info) throw new Error('jupyter not available')
-      const kernelId = await createKernel(info.url, info.token)
+      const kernelId = await createKernel(info.url, info.token, specName, kernelCwdPath(path, cwdOverride))
       const client = new KernelClient(info.url, info.token, kernelId)
-      client.onStatusChange = (status) => dispatch({ type: 'SET_STATUS', sessionId, status })
+      client.onStatusChange = (status) => dispatch({ type: 'SET_STATUS', path, status })
       await client.connect()
-      kernelClients.set(sessionId, client)
-      dispatch({ type: 'SET_STATUS', sessionId, status: 'idle' })
+      kernelClients.set(path, client)
+      dispatch({ type: 'SET_KERNEL_NAME', path, name: specName })
+      dispatch({ type: 'SET_STATUS', path, status: 'idle' })
+      return true
     } catch {
-      dispatch({ type: 'SET_STATUS', sessionId, status: 'dead' })
+      dispatch({ type: 'SET_STATUS', path, status: 'dead' })
+      return false
     }
   }, [])
 
-  const closeNotebook = useCallback((sessionId: string) => {
-    dispatch({ type: 'CLOSE', sessionId })
+  // Attach a kernel to a path if it doesn't already have one (reused otherwise).
+  const ensureKernel = useCallback(async (path: string) => {
+    if (kernelClients.has(path)) return
+    dispatch({ type: 'SET_STATUS', path, status: 'starting' })
+    const info = await getServerInfo()
+    if (!info) { dispatch({ type: 'SET_STATUS', path, status: 'dead' }); return }
+    const allSpecs = await getSpecs(info.url, info.token).catch(() => ({ default: 'python3', list: [] as KernelSpecInfo[] }))
+    setSpecs(allSpecs.list)
+    const nb = nbRef.current[path]
+    await startKernel(path, chooseSpec(nb?.meta, allSpecs), nb?.kernelCwd ?? null)
+  }, [startKernel])
+
+  const openNotebook = useCallback(async (path: string) => {
+    if (!nbRef.current[path]) {
+      // First open: load cells from disk.
+      const res = await window.api.fs.readText(path)
+      const { cells, meta } = res.ok ? parseNotebook(res.text) : parseNotebook('')
+      dispatch({ type: 'LOAD', path, cells, meta })
+    }
+    await ensureKernel(path)
+  }, [ensureKernel])
+
+  const disposeKernel = async (path: string) => {
+    const old = kernelClients.get(path)
+    if (old) {
+      await old.shutdown()
+      old.dispose()
+      kernelClients.delete(path)
+    }
+  }
+
+  // Switch a notebook to a different kernelspec (using the notebook's own dir),
+  // persisting the choice into the notebook's metadata so it reopens the same.
+  const setKernel = useCallback(async (path: string, specName: string) => {
+    const nb = nbRef.current[path]
+    if (nb?.kernelName === specName && !nb?.kernelCwd && kernelClients.has(path)) return
+    await disposeKernel(path)
+    dispatch({ type: 'SET_STATUS', path, status: 'starting' })
+    dispatch({ type: 'SET_KERNEL_CWD', path, cwd: null })  // back to the notebook's dir
+    const spec = specsCache?.list.find((s) => s.name === specName)
+    dispatch({ type: 'SET_KERNELSPEC_META', path, kernelspec: { name: specName, display_name: spec?.displayName ?? specName, language: spec?.language ?? 'python' } })
+    await startKernel(path, specName, null)
+  }, [startKernel])
+
+  // Point a notebook's kernel at a custom directory: starts the auto-venv kernel
+  // there so it resolves the nearest venv to that directory. Persisted in metadata.
+  const setKernelDir = useCallback(async (path: string, dir: string) => {
+    await disposeKernel(path)
+    dispatch({ type: 'SET_STATUS', path, status: 'starting' })
+    dispatch({ type: 'SET_KERNEL_CWD', path, cwd: dir })
+    const specName = specsCache?.list.some((s) => s.name === PREFERRED_KERNEL) ? PREFERRED_KERNEL : (specsCache?.default ?? 'python3')
+    const spec = specsCache?.list.find((s) => s.name === specName)
+    dispatch({ type: 'SET_KERNELSPEC_META', path, kernelspec: { name: specName, display_name: spec?.displayName ?? specName, language: spec?.language ?? 'python' } })
+    await startKernel(path, specName, dir)
+  }, [startKernel])
+
+  const saveNotebook = useCallback(async (path: string): Promise<WriteResult | undefined> => {
+    const nb = nbRef.current[path]
+    if (!nb) return
+    const text = serializeNotebook(nb.cells, nb.meta)
+    const res = await window.api.fs.writeFile(path, text)
+    if (res.ok) dispatch({ type: 'MARK_CLEAN', path })
+    return res
   }, [])
 
-  const addCell = useCallback((sessionId: string) => {
-    dispatch({ type: 'ADD_CELL', sessionId, cell: newCell() })
+  const addCell = useCallback((path: string, type: CellType = 'code') => {
+    dispatch({ type: 'ADD_CELL', path, cell: newCell(type) })
   }, [])
 
-  const removeCell = useCallback((sessionId: string, cellId: string) => {
-    dispatch({ type: 'REMOVE_CELL', sessionId, cellId })
+  const insertCell = useCallback((path: string, type: CellType, index: number): string => {
+    const cell = newCell(type)
+    dispatch({ type: 'INSERT_CELL', path, index, cell })
+    return cell.id
   }, [])
 
-  const updateCode = useCallback((sessionId: string, cellId: string, code: string) => {
-    dispatch({ type: 'UPDATE_CODE', sessionId, cellId, code })
+  const moveCell = useCallback((path: string, from: number, to: number) => {
+    dispatch({ type: 'MOVE_CELL', path, from, to })
   }, [])
 
-  const executeCell = useCallback((sessionId: string, cellId: string) => {
-    const client = kernelClients.get(sessionId)
-    const nb = notebooks[sessionId]
-    if (!client || !nb) return
-    const cell = nb.cells.find((c) => c.id === cellId)
-    if (!cell || cell.running) return
-
-    dispatch({ type: 'CLEAR_OUTPUTS', sessionId, cellId })
-    dispatch({ type: 'SET_RUNNING', sessionId, cellId, running: true })
-
-    client.execute(
-      cell.code,
-      (output) => dispatch({ type: 'ADD_OUTPUT', sessionId, cellId, output }),
-      (count) => {
-        dispatch({ type: 'SET_EXEC_COUNT', sessionId, cellId, count })
-        dispatch({ type: 'SET_RUNNING', sessionId, cellId, running: false })
-      },
-    )
-  }, [notebooks])
-
-  const clearOutputs = useCallback((sessionId: string, cellId: string) => {
-    dispatch({ type: 'CLEAR_OUTPUTS', sessionId, cellId })
+  const setCellType = useCallback((path: string, cellId: string, type: CellType) => {
+    dispatch({ type: 'SET_CELL_TYPE', path, cellId, cellType: type })
   }, [])
 
-  const interruptKernel = useCallback((sessionId: string) => {
-    kernelClients.get(sessionId)?.interrupt()
+  const removeCell = useCallback((path: string, cellId: string) => {
+    dispatch({ type: 'REMOVE_CELL', path, cellId })
   }, [])
 
-  const restartKernel = useCallback(async (sessionId: string) => {
-    const client = kernelClients.get(sessionId)
+  const updateCode = useCallback((path: string, cellId: string, code: string) => {
+    dispatch({ type: 'UPDATE_CODE', path, cellId, code })
+  }, [])
+
+  // Run one code cell, resolving when the kernel replies. `false` means the cell
+  // errored (so Run All can stop), `true` means it finished (or was skipped).
+  const runCell = useCallback((path: string, cellId: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      const client = kernelClients.get(path)
+      const nb = nbRef.current[path]
+      if (!client || !nb) return resolve(false)
+      const cell = nb.cells.find((c) => c.id === cellId)
+      if (!cell || cell.type !== 'code' || cell.running) return resolve(true)
+
+      dispatch({ type: 'CLEAR_OUTPUTS', path, cellId })
+      dispatch({ type: 'SET_RUNNING', path, cellId, running: true })
+
+      let errored = false
+      client.execute(
+        cell.code,
+        (output) => {
+          if (output.type === 'error') errored = true
+          dispatch({ type: 'ADD_OUTPUT', path, cellId, output })
+        },
+        (count) => {
+          dispatch({ type: 'SET_EXEC_COUNT', path, cellId, count })
+          dispatch({ type: 'SET_RUNNING', path, cellId, running: false })
+          resolve(!errored)
+        },
+      )
+    })
+  }, [])
+
+  const executeCell = useCallback((path: string, cellId: string) => {
+    void runCell(path, cellId)
+  }, [runCell])
+
+  // Run every code cell top-to-bottom, stopping at the first error (as Jupyter does).
+  const runAll = useCallback(async (path: string) => {
+    if (!kernelClients.has(path)) return
+    const ids = (nbRef.current[path]?.cells ?? []).filter((c) => c.type === 'code').map((c) => c.id)
+    for (const id of ids) {
+      if (!(await runCell(path, id))) break
+    }
+  }, [runCell])
+
+  const clearOutputs = useCallback((path: string, cellId: string) => {
+    dispatch({ type: 'CLEAR_OUTPUTS', path, cellId })
+  }, [])
+
+  const clearAllOutputs = useCallback((path: string) => {
+    for (const c of nbRef.current[path]?.cells ?? []) {
+      if (c.type === 'code') dispatch({ type: 'CLEAR_OUTPUTS', path, cellId: c.id })
+    }
+  }, [])
+
+  const interruptKernel = useCallback((path: string) => {
+    kernelClients.get(path)?.interrupt()
+  }, [])
+
+  const restartKernel = useCallback(async (path: string) => {
+    const client = kernelClients.get(path)
     if (!client) return
-    dispatch({ type: 'SET_STATUS', sessionId, status: 'starting' })
+    dispatch({ type: 'SET_STATUS', path, status: 'starting' })
     await client.restart()
   }, [])
 
-  const installAndRetry = useCallback(async (sessionId: string) => {
-    dispatch({ type: 'SET_STATUS', sessionId, status: 'starting' })
+  // Wait until the kernel reports idle again after a restart (or give up). We set
+  // 'starting' before calling this, so we won't read a stale 'idle'.
+  const waitForIdle = useCallback((path: string, timeoutMs = 20000): Promise<void> => {
+    return new Promise((resolve) => {
+      const start = Date.now()
+      const tick = () => {
+        const st = nbRef.current[path]?.kernelStatus
+        if (st === 'idle' || st === 'dead' || Date.now() - start > timeoutMs) return resolve()
+        setTimeout(tick, 100)
+      }
+      setTimeout(tick, 300)
+    })
+  }, [])
+
+  // Fresh kernel, then run the whole notebook — the reliable "reproduce from scratch".
+  const restartAndRunAll = useCallback(async (path: string) => {
+    const client = kernelClients.get(path)
+    if (!client) return
+    dispatch({ type: 'SET_STATUS', path, status: 'starting' })
+    await client.restart()
+    await waitForIdle(path)
+    await runAll(path)
+  }, [runAll, waitForIdle])
+
+  const installAndRetry = useCallback(async (path: string) => {
+    dispatch({ type: 'SET_STATUS', path, status: 'starting' })
     await window.api.jupyter.install()
-    // Reset cached server info so next openNotebook attempt spawns a fresh server
+    // Reset cached server/spec info so the next attempt spawns a fresh server.
     serverInfo = null
-    kernelClients.get(sessionId)?.dispose()
-    kernelClients.delete(sessionId)
-    try {
-      const info = await getServerInfo()
-      if (!info) throw new Error('jupyter not available')
-      const kernelId = await createKernel(info.url, info.token)
-      const client = new KernelClient(info.url, info.token, kernelId)
-      client.onStatusChange = (status) => dispatch({ type: 'SET_STATUS', sessionId, status })
-      await client.connect()
-      kernelClients.set(sessionId, client)
-      dispatch({ type: 'SET_STATUS', sessionId, status: 'idle' })
-    } catch {
-      dispatch({ type: 'SET_STATUS', sessionId, status: 'dead' })
+    specsCache = null
+    kernelClients.get(path)?.dispose()
+    kernelClients.delete(path)
+    await ensureKernel(path)
+  }, [ensureKernel])
+
+  // Follow a file/folder rename: move the running kernel clients (keyed by path)
+  // and re-key the notebook state so an open notebook keeps its cells + kernel.
+  const renamePath = useCallback((from: string, to: string) => {
+    for (const key of [...kernelClients.keys()]) {
+      const nk = remapPath(key, from, to)
+      if (nk === key) continue
+      const client = kernelClients.get(key)!
+      kernelClients.delete(key)
+      kernelClients.set(nk, client)
     }
+    dispatch({ type: 'RENAME', from, to })
   }, [])
 
   return (
     <NotebookContext.Provider value={{
-      notebooks, openNotebook, closeNotebook,
-      addCell, removeCell, updateCode,
-      executeCell, clearOutputs,
+      notebooks, specs,
+      openNotebook, saveNotebook, setKernel, setKernelDir,
+      addCell, insertCell, moveCell, setCellType, removeCell, updateCode,
+      executeCell, runAll, restartAndRunAll, clearOutputs, clearAllOutputs,
       interruptKernel, restartKernel, installAndRetry,
+      renamePath,
     }}>
       {children}
     </NotebookContext.Provider>

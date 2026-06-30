@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
-import { EditorState } from '@codemirror/state'
+import { EditorState, type Extension } from '@codemirror/state'
 import { defaultKeymap, indentWithTab } from '@codemirror/commands'
 import { python } from '@codemirror/lang-python'
+import { markdown } from '@codemirror/lang-markdown'
 import type { Cell as CellData } from '../../store/notebooks'
 import { editorTheme, editorHighlight } from '../../lib/editorTheme'
 import { Output } from './Output'
@@ -10,31 +11,47 @@ import { Output } from './Output'
 interface Props {
   cell: CellData
   index: number
+  selected: boolean
+  onSelect: () => void
   onCodeChange: (code: string) => void
-  onExecute: () => void
+  onRun: () => void           // Ctrl/Cmd+Enter — run in place
+  onRunAdvance: () => void    // Shift+Enter — run, then move to next cell
+  onEscape: () => void        // leave the editor (enter command mode)
+  onInsertBelow: () => void   // Alt+Enter — run and insert a cell below
+  onMoveUp: () => void
+  onMoveDown: () => void
+  onToggleType: () => void
   onRemove: () => void
+  onReorder: (fromIndex: number) => void
 }
 
-export function Cell({ cell, index, onCodeChange, onExecute, onRemove }: Props) {
+export function Cell(props: Props) {
+  const { cell, index, selected, onSelect, onMoveUp, onMoveDown, onToggleType, onRemove, onReorder } = props
   const editorRef = useRef<HTMLDivElement>(null)
-  const cbRef = useRef({ onCodeChange, onExecute })
-  cbRef.current = { onCodeChange, onExecute }
+  // Latest callbacks, read inside the (once-built) CodeMirror keymap.
+  const cbRef = useRef(props)
+  cbRef.current = props
+  const isCode = cell.type === 'code'
 
   useEffect(() => {
     if (!editorRef.current) return
+    const lang: Extension[] = cell.type === 'markdown' ? [markdown()] : cell.type === 'code' ? [python()] : []
+    const runKeys = [
+      { key: 'Shift-Enter', run: () => { cbRef.current.onRunAdvance(); return true } },
+      { key: 'Mod-Enter', run: () => { cbRef.current.onRun(); return true } },
+      { key: 'Alt-Enter', run: () => { cbRef.current.onInsertBelow(); return true } },
+      { key: 'Escape', run: (v: EditorView) => { v.contentDOM.blur(); cbRef.current.onEscape(); return true } },
+    ]
+
     const view = new EditorView({
       state: EditorState.create({
         doc: cell.code,
         extensions: [
           lineNumbers(),
-          python(),
+          ...lang,
           editorTheme,
           editorHighlight,
-          keymap.of([
-            { key: 'Shift-Enter', run: () => { cbRef.current.onExecute(); return true } },
-            indentWithTab,
-            ...defaultKeymap,
-          ]),
+          keymap.of([...runKeys, indentWithTab, ...defaultKeymap]),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) cbRef.current.onCodeChange(u.state.doc.toString())
           }),
@@ -44,34 +61,66 @@ export function Cell({ cell, index, onCodeChange, onExecute, onRemove }: Props) 
       parent: editorRef.current,
     })
     return () => view.destroy()
-  }, [cell.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cell.id, cell.type]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const countLabel = cell.running ? '*' : (cell.executionCount ?? ' ')
+  const label = isCode
+    ? `[${cell.running ? '*' : (cell.executionCount ?? ' ')}]:`
+    : cell.type === 'markdown' ? 'md' : 'raw'
 
   return (
-    <div className="group flex gap-2">
-      <div className="w-12 shrink-0 text-right pt-2 text-xs text-ctp-overlay font-mono select-none">
-        [{countLabel}]:
+    <div
+      className={`group flex gap-2 rounded ${selected ? 'ring-1 ring-ctp-mauve/60' : ''}`}
+      onMouseDown={onSelect}
+      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' }}
+      onDrop={(e) => {
+        const from = Number(e.dataTransfer.getData('application/x-cell-index'))
+        if (!Number.isNaN(from)) { e.preventDefault(); onReorder(from) }
+      }}
+    >
+      {/* Gutter: execution label + drag handle for reordering */}
+      <div
+        draggable
+        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('application/x-cell-index', String(index)) }}
+        title="Drag to reorder"
+        className="w-12 shrink-0 text-right pt-2 text-xs text-ctp-overlay font-mono select-none cursor-grab active:cursor-grabbing"
+      >
+        {label}
       </div>
 
       <div className="flex-1 min-w-0 space-y-1">
-        <div className={`rounded border ${cell.running ? 'border-ctp-yellow' : 'border-ctp-surface1 focus-within:border-ctp-mauve'} transition-colors`}>
+        <div
+          data-cell-id={cell.id}
+          className={`rounded border ${cell.running ? 'border-ctp-yellow' : 'border-ctp-surface1 focus-within:border-ctp-mauve'} transition-colors`}
+        >
           <div ref={editorRef} />
         </div>
 
-        {cell.outputs.length > 0 && (
+        {isCode && cell.outputs.length > 0 && (
           <div className="pl-1 border-l-2 border-ctp-surface1 space-y-1 py-1">
             {cell.outputs.map((o, i) => <Output key={i} output={o} />)}
           </div>
         )}
       </div>
 
-      <button
-        onClick={onRemove}
-        className="opacity-0 group-hover:opacity-100 self-start mt-2 text-ctp-overlay hover:text-ctp-red transition-opacity text-xs px-0.5"
-      >
-        ✕
-      </button>
+      {/* Per-cell actions — appear on hover */}
+      <div className="w-5 shrink-0 self-start mt-1.5 flex flex-col items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity text-ctp-overlay">
+        <CellBtn onClick={onMoveUp} title="Move up">↑</CellBtn>
+        <CellBtn onClick={onMoveDown} title="Move down">↓</CellBtn>
+        <CellBtn onClick={onToggleType} title={isCode ? 'Convert to markdown' : 'Convert to code'}>{isCode ? 'M' : '{}'}</CellBtn>
+        <CellBtn onClick={onRemove} title="Delete cell" danger>✕</CellBtn>
+      </div>
     </div>
+  )
+}
+
+function CellBtn({ children, onClick, title, danger }: { children: React.ReactNode; onClick: () => void; title: string; danger?: boolean }) {
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onClick() }}
+      title={title}
+      className={`text-[10px] leading-none px-0.5 py-0.5 rounded hover:bg-ctp-surface0 ${danger ? 'hover:text-ctp-red' : 'hover:text-ctp-text'}`}
+    >
+      {children}
+    </button>
   )
 }

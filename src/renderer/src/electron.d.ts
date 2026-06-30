@@ -4,7 +4,7 @@ declare global {
   interface Window {
     api: {
       session: {
-        create: (name: string, cwd: string) => Promise<string>
+        create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean) => Promise<string>
         destroy: (id: string) => Promise<void>
         list: () => Promise<SessionInfo[]>
         sendInput: (id: string, data: string) => void
@@ -20,12 +20,20 @@ declare global {
         resize: (id: string, cols: number, rows: number) => void
       }
       dialog: {
-        openDir: () => Promise<string | null>
+        openDir: (defaultPath?: string) => Promise<string | null>
       }
       fs: {
         readDir: (path: string) => Promise<DirEntry[]>
         readFile: (path: string) => Promise<FilePreview>
+        readText: (path: string) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
         writeFile: (path: string, content: string) => Promise<WriteResult>
+        copy: (src: string, destDir: string) => Promise<WriteResult>
+        move: (src: string, destDir: string) => Promise<WriteResult>
+        delete: (path: string) => Promise<WriteResult>
+        rename: (path: string, newName: string) => Promise<WriteResult>
+        mkdir: (path: string) => Promise<WriteResult>
+        createFile: (path: string) => Promise<WriteResult>
+        pathForFile: (file: File) => string
       }
       shell: {
         openPath: (path: string) => Promise<string>
