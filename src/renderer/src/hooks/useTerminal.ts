@@ -75,7 +75,7 @@ export function useTerminal(
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
-    const rafId = requestAnimationFrame(() => fit.fit())
+    const rafId = requestAnimationFrame(() => { fit.fit(); reportAtBottom() })
     fitRef.current = fit
     termRef.current = term
 
@@ -87,7 +87,7 @@ export function useTerminal(
     // Report bottom-state transitions so the view can offer a "jump to bottom"
     // affordance — the mouse wheel alone can't always reach the live edge.
     let lastAtBottom = true
-    const reportAtBottom = () => {
+    function reportAtBottom() {
       const b = term.buffer.active
       const atBottom = b.viewportY >= b.baseY
       if (atBottom !== lastAtBottom) {
@@ -95,10 +95,18 @@ export function useTerminal(
         onAtBottomRef.current?.(atBottom)
       }
     }
+    // term.onScroll does NOT fire for user wheel/trackpad scrolling in xterm 5.x
+    // — only when the buffer itself scrolls (new output). Without this, the
+    // button only ever appeared the next time output arrived, never while the
+    // user scrolled up to read. Listen to the real viewport's DOM scroll too;
+    // xterm registers its own scroll handler during open() first, so viewportY
+    // is already up to date when ours runs.
     const offScroll = term.onScroll(reportAtBottom)
+    const viewport = el.querySelector<HTMLElement>('.xterm-viewport')
+    viewport?.addEventListener('scroll', reportAtBottom, { passive: true })
 
     const ro = new ResizeObserver((entries) => {
-      if (entries[0]?.contentRect.width > 0) fit.fit()
+      if (entries[0]?.contentRect.width > 0) { fit.fit(); reportAtBottom() }
     })
     ro.observe(el)
 
@@ -113,6 +121,7 @@ export function useTerminal(
       terminalRegistry.delete(el)
       offOutput()
       offScroll.dispose()
+      viewport?.removeEventListener('scroll', reportAtBottom)
       ro.disconnect()
       term.dispose()
       fitRef.current = null

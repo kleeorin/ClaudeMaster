@@ -2,9 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useFileBrowser } from '../store/fileBrowser'
 import { useNotebooks } from '../store/notebooks'
 import { emptyNotebookJSON } from '../lib/ipynb'
+import type { KernelStatus } from '../lib/kernelClient'
 import type { DirEntry } from '../../../shared/types'
 
 const isNotebook = (name: string) => name.endsWith('.ipynb')
+
+// Kernel statuses that count as a live kernel (one that can be killed).
+const LIVE_KERNEL: KernelStatus[] = ['starting', 'idle', 'busy']
 
 interface Props {
   sessionId: string
@@ -64,7 +68,7 @@ const shortDate = (ms: number): string => {
 
 export function FileBrowserView({ sessionId, cwd }: Props) {
   const { browsers, navigate, openFile, clipboard, setClipboard, renamePath } = useFileBrowser()
-  const { openNotebook, renamePath: renameNotebookPath } = useNotebooks()
+  const { notebooks, openNotebook, shutdownKernel, renamePath: renameNotebookPath } = useNotebooks()
   const [entries, setEntries] = useState<DirEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [menu, setMenu] = useState<Menu | null>(null)
@@ -89,6 +93,13 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
   // Whether the viewed dir is still inside the session root (vs. escaped above it).
   const inRoot = path === cwd || path.startsWith(cwd.endsWith('/') ? cwd : `${cwd}/`)
   const fullOf = (name: string) => (path === '/' ? `/${name}` : `${path}/${name}`)
+
+  // Does this entry have a live kernel that could be killed from the menu?
+  const liveKernelFor = (entry: DirEntry | null): boolean => {
+    if (!entry || !isNotebook(entry.name)) return false
+    const st = notebooks[fullOf(entry.name)]?.kernelStatus
+    return !!st && LIVE_KERNEL.includes(st)
+  }
 
   const refresh = () => window.api.fs.readDir(path).then(setEntries)
 
@@ -384,6 +395,7 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
               >
                 <EntryIcon isDir={e.isDir} isNb={isNotebook(e.name)} />
                 <span className="truncate flex-1">{e.name}</span>
+                {isNotebook(e.name) && <KernelDot status={notebooks[fullOf(e.name)]?.kernelStatus} />}
                 {sort.key === 'size' && !e.isDir && (
                   <span className="shrink-0 text-[10px] text-ctp-overlay tabular-nums">{humanSize(e.size)}</span>
                 )}
@@ -401,11 +413,13 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
           menu={menu}
           hasClipboard={!!clipboard}
           pasteDir={menu.entry?.isDir ? fullOf(menu.entry.name) : path}
+          kernelLive={liveKernelFor(menu.entry)}
           onCopy={(e) => { setClipboard({ path: fullOf(e.name), mode: 'copy' }); setMenu(null) }}
           onCut={(e) => { setClipboard({ path: fullOf(e.name), mode: 'cut' }); setMenu(null) }}
           onRename={startRename}
           onDelete={doDelete}
           onPaste={doPaste}
+          onKillKernel={(e) => { void shutdownKernel(fullOf(e.name)); setMenu(null) }}
           onNewFile={() => startNew('newFile')}
           onNewFolder={() => startNew('newFolder')}
         />
@@ -488,6 +502,22 @@ function EntryIcon({ isDir, isNb }: { isDir: boolean; isNb: boolean }) {
   )
 }
 
+// Kernel indicator next to a notebook: yellow = live but idle, flashing green =
+// executing, dim pulse = starting. No dot when there's no live kernel (never
+// started, or dead).
+export function KernelDot({ status }: { status: KernelStatus | null | undefined }) {
+  if (!status || status === 'dead') return null
+  const cls =
+    status === 'busy'     ? 'bg-ctp-green animate-blink'
+    : status === 'starting' ? 'bg-ctp-overlay animate-pulse'
+    : 'bg-ctp-yellow'  // idle — live but not running
+  const title =
+    status === 'busy'     ? 'Kernel running'
+    : status === 'starting' ? 'Kernel starting'
+    : 'Kernel idle'
+  return <span className={`shrink-0 w-2 h-2 rounded-full ${cls}`} title={title} />
+}
+
 function HeaderButton({ onClick, title, children }: { onClick: () => void; title: string; children: React.ReactNode }) {
   return (
     <button
@@ -538,16 +568,18 @@ interface MenuProps {
   menu: Menu
   hasClipboard: boolean
   pasteDir: string
+  kernelLive: boolean
   onCopy: (e: DirEntry) => void
   onCut: (e: DirEntry) => void
   onRename: (e: DirEntry) => void
   onDelete: (e: DirEntry) => void
   onPaste: (destDir: string) => void
+  onKillKernel: (e: DirEntry) => void
   onNewFile: () => void
   onNewFolder: () => void
 }
 
-function FileMenu({ menu, hasClipboard, pasteDir, onCopy, onCut, onRename, onDelete, onPaste, onNewFile, onNewFolder }: MenuProps) {
+function FileMenu({ menu, hasClipboard, pasteDir, kernelLive, onCopy, onCut, onRename, onDelete, onPaste, onKillKernel, onNewFile, onNewFolder }: MenuProps) {
   const { entry } = menu
   const pasteLabel = entry?.isDir ? `Paste into "${entry.name}"` : 'Paste'
   return (
@@ -562,6 +594,12 @@ function FileMenu({ menu, hasClipboard, pasteDir, onCopy, onCut, onRename, onDel
           <Item onClick={() => onCut(entry)}>Cut</Item>
           <Item onClick={() => onRename(entry)}>Rename</Item>
           <Item disabled={!hasClipboard} onClick={() => onPaste(pasteDir)}>{pasteLabel}</Item>
+          {kernelLive && (
+            <>
+              <div className="mx-2 my-0.5 border-t border-ctp-surface1" />
+              <Item onClick={() => onKillKernel(entry)}>Kill kernel</Item>
+            </>
+          )}
           <div className="mx-2 my-0.5 border-t border-ctp-surface1" />
           <Item danger onClick={() => onDelete(entry)}>Delete</Item>
         </>

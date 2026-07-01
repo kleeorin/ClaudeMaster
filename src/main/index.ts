@@ -6,6 +6,7 @@ import type { DirEntry, FilePreview, WriteResult } from '../shared/types'
 import { SessionManager } from './sessionManager'
 import { PaneManager } from './paneManager'
 import { JupyterManager } from './jupyterManager'
+import * as gitManager from './gitManager'
 import { saveState, loadState } from './sessionPersistence'
 import type { SavedSession } from '../shared/types'
 
@@ -33,6 +34,8 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
   mainWindow.on('closed', () => { mainWindow = null })
+  // Stop the taskbar flash once the user actually looks at the window.
+  mainWindow.on('focus', () => mainWindow?.flashFrame(false))
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault()
@@ -251,6 +254,39 @@ ipcMain.handle('fs:writeFile', async (_, path: string, content: string): Promise
 
 ipcMain.handle('jupyter:start', () => jupyter.start())
 ipcMain.handle('jupyter:install', () => jupyter.install())
+
+ipcMain.handle('git:status', (_, dir: string) => gitManager.status(dir))
+ipcMain.handle('git:diff', (_, dir: string, file: string, staged: boolean, untracked: boolean) =>
+  gitManager.diff(dir, file, staged, untracked)
+)
+ipcMain.handle('git:stage', (_, dir: string, file: string) => gitManager.stage(dir, file))
+ipcMain.handle('git:unstage', (_, dir: string, file: string) => gitManager.unstage(dir, file))
+ipcMain.handle('git:stageAll', (_, dir: string) => gitManager.stageAll(dir))
+ipcMain.handle('git:unstageAll', (_, dir: string) => gitManager.unstageAll(dir))
+ipcMain.handle('git:commit', (_, dir: string, message: string) => gitManager.commit(dir, message))
+ipcMain.handle('git:log', (_, dir: string, limit?: number) => gitManager.log(dir, limit))
+ipcMain.handle('git:show', (_, dir: string, hash: string) => gitManager.show(dir, hash))
+ipcMain.handle('git:branches', (_, dir: string) => gitManager.branches(dir))
+ipcMain.handle('git:createBranch', (_, dir: string, name: string) => gitManager.createBranch(dir, name))
+ipcMain.handle('git:checkoutBranch', (_, dir: string, name: string) => gitManager.checkoutBranch(dir, name))
+ipcMain.handle('git:deleteBranch', (_, dir: string, name: string, force: boolean) => gitManager.deleteBranch(dir, name, force))
+ipcMain.handle('git:mergeBranch', (_, dir: string, name: string) => gitManager.mergeBranch(dir, name))
+
+// Bring the window forward (e.g. from a notification click).
+ipcMain.handle('app:focus', () => {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+})
+
+// Reflect the count of sessions needing attention on the OS: dock/taskbar badge
+// (macOS, Linux Unity) plus a frame flash while the window is unfocused.
+ipcMain.handle('app:setAttention', (_, count: number) => {
+  app.badgeCount = Math.max(0, count)
+  if (!mainWindow) return
+  mainWindow.flashFrame(count > 0 && !mainWindow.isFocused())
+})
 
 ipcMain.handle('dialog:openDir', async (_, defaultPath?: string) => {
   if (!mainWindow) return null

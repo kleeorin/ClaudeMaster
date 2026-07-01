@@ -1,4 +1,4 @@
-import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult } from '../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -38,9 +38,29 @@ declare global {
       shell: {
         openPath: (path: string) => Promise<string>
       }
+      app: {
+        focus: () => Promise<void>
+        setAttention: (count: number) => Promise<void>
+      }
       jupyter: {
         start: () => Promise<{ url: string; token: string } | null>
         install: () => Promise<boolean>
+      }
+      git: {
+        status: (dir: string) => Promise<GitStatus>
+        diff: (dir: string, file: string, staged: boolean, untracked: boolean) => Promise<GitDiff>
+        stage: (dir: string, file: string) => Promise<GitResult>
+        unstage: (dir: string, file: string) => Promise<GitResult>
+        stageAll: (dir: string) => Promise<GitResult>
+        unstageAll: (dir: string) => Promise<GitResult>
+        commit: (dir: string, message: string) => Promise<GitResult>
+        log: (dir: string, limit?: number) => Promise<GitLog>
+        show: (dir: string, hash: string) => Promise<GitDiff>
+        branches: (dir: string) => Promise<GitBranches>
+        createBranch: (dir: string, name: string) => Promise<GitResult>
+        checkoutBranch: (dir: string, name: string) => Promise<GitResult>
+        deleteBranch: (dir: string, name: string, force: boolean) => Promise<GitResult>
+        mergeBranch: (dir: string, name: string) => Promise<GitResult>
       }
       on: {
         output: (cb: (id: string, data: string) => void) => () => void

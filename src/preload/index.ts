@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult } from '../shared/types'
+import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches } from '../shared/types'
 
 contextBridge.exposeInMainWorld('api', {
   session: {
@@ -62,11 +62,47 @@ contextBridge.exposeInMainWorld('api', {
     openPath: (path: string): Promise<string> =>
       ipcRenderer.invoke('shell:openPath', path),
   },
+  app: {
+    focus: (): Promise<void> =>
+      ipcRenderer.invoke('app:focus'),
+    setAttention: (count: number): Promise<void> =>
+      ipcRenderer.invoke('app:setAttention', count),
+  },
   jupyter: {
     start: (): Promise<{ url: string; token: string } | null> =>
       ipcRenderer.invoke('jupyter:start'),
     install: (): Promise<boolean> =>
       ipcRenderer.invoke('jupyter:install'),
+  },
+  git: {
+    status: (dir: string): Promise<GitStatus> =>
+      ipcRenderer.invoke('git:status', dir),
+    diff: (dir: string, file: string, staged: boolean, untracked: boolean): Promise<GitDiff> =>
+      ipcRenderer.invoke('git:diff', dir, file, staged, untracked),
+    stage: (dir: string, file: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:stage', dir, file),
+    unstage: (dir: string, file: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:unstage', dir, file),
+    stageAll: (dir: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:stageAll', dir),
+    unstageAll: (dir: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:unstageAll', dir),
+    commit: (dir: string, message: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:commit', dir, message),
+    log: (dir: string, limit?: number): Promise<GitLog> =>
+      ipcRenderer.invoke('git:log', dir, limit),
+    show: (dir: string, hash: string): Promise<GitDiff> =>
+      ipcRenderer.invoke('git:show', dir, hash),
+    branches: (dir: string): Promise<GitBranches> =>
+      ipcRenderer.invoke('git:branches', dir),
+    createBranch: (dir: string, name: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:createBranch', dir, name),
+    checkoutBranch: (dir: string, name: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:checkoutBranch', dir, name),
+    deleteBranch: (dir: string, name: string, force: boolean): Promise<GitResult> =>
+      ipcRenderer.invoke('git:deleteBranch', dir, name, force),
+    mergeBranch: (dir: string, name: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:mergeBranch', dir, name),
   },
   on: {
     output: (cb: (id: string, data: string) => void): (() => void) => {

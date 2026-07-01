@@ -23,3 +23,8 @@ html, body, #root {
 .xterm-viewport {
   overflow-y: auto !important;
 }
+
+/* While dragging a pane separator, force the resize cursor everywhere and
+   suppress selection so passing over a terminal / editor doesn't fight it. */
+.cm-resizing-x, .cm-resizing-x * { cursor: col-resize !important; user-select: none !important; }
+.cm-resizing-y, .cm-resizing-y * { cursor: row-resize !important; user-select: none !important; }

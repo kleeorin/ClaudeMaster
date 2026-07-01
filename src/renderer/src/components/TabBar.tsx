@@ -6,12 +6,15 @@ interface Props {
   activeTab: string
   onSelect: (tab: string) => void
   onClose: (path: string) => void
+  splitView: boolean
+  onToggleSplit: () => void
 }
 
 // Tabs across the top of the main column: a fixed "Claude" tab (the terminal,
 // full-screen) followed by one tab per open file. Shown only when at least one
-// file is open.
-export function TabBar({ openFiles, dirtyFiles, activeTab, onSelect, onClose }: Props) {
+// file is open. The split toggle (right) lays the active file beside Claude
+// instead of over it.
+export function TabBar({ openFiles, dirtyFiles, activeTab, onSelect, onClose, splitView, onToggleSplit }: Props) {
   return (
     <div className="h-9 shrink-0 flex items-stretch bg-ctp-mantle border-b border-ctp-surface0 overflow-x-auto">
       <Tab label="Claude" active={activeTab === CLAUDE_TAB} onSelect={() => onSelect(CLAUDE_TAB)} />
@@ -26,6 +29,18 @@ export function TabBar({ openFiles, dirtyFiles, activeTab, onSelect, onClose }: 
           onClose={() => onClose(f.path)}
         />
       ))}
+      <button
+        onClick={onToggleSplit}
+        title={splitView ? 'Stack file over Claude' : 'Show file beside Claude'}
+        className={`ml-auto shrink-0 flex items-center px-2.5 border-l border-ctp-surface0 ${
+          splitView ? 'text-ctp-blue bg-ctp-surface0' : 'text-ctp-subtext hover:text-ctp-text hover:bg-ctp-surface0'
+        }`}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="3" y="4" width="18" height="16" rx="1.5" />
+          <path d="M13 4v16" />
+        </svg>
+      </button>
     </div>
   )
 }

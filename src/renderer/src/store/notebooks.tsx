@@ -216,6 +216,7 @@ interface ContextValue {
   clearAllOutputs: (path: string) => void
   interruptKernel: (path: string) => void
   restartKernel: (path: string) => Promise<void>
+  shutdownKernel: (path: string) => Promise<void>
   installAndRetry: (path: string) => Promise<void>
   renamePath: (from: string, to: string) => void
 }
@@ -280,6 +281,15 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
       kernelClients.delete(path)
     }
   }
+
+  // Deliberately tear down a notebook's kernel (from the notebook browser, or when
+  // its owning session closes). Leaves the loaded cells intact; reopening starts
+  // a fresh kernel. 'dead' clears the live indicator everywhere.
+  const shutdownKernel = useCallback(async (path: string) => {
+    if (!kernelClients.has(path)) return
+    await disposeKernel(path)
+    dispatch({ type: 'SET_STATUS', path, status: 'dead' })
+  }, [])
 
   // Switch a notebook to a different kernelspec (using the notebook's own dir),
   // persisting the choice into the notebook's metadata so it reopens the same.
@@ -458,7 +468,7 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
       openNotebook, saveNotebook, setKernel, setKernelDir,
       addCell, insertCell, moveCell, setCellType, removeCell, updateCode,
       executeCell, runAll, restartAndRunAll, clearOutputs, clearAllOutputs,
-      interruptKernel, restartKernel, installAndRetry,
+      interruptKernel, restartKernel, shutdownKernel, installAndRetry,
       renamePath,
     }}>
       {children}

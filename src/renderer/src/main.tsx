@@ -5,6 +5,7 @@ import { App } from './App'
 import { SessionProvider } from './store/sessions'
 import { NotebookProvider } from './store/notebooks'
 import { FileBrowserProvider } from './store/fileBrowser'
+import { GitPanelProvider } from './store/gitPanel'
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -33,13 +34,15 @@ class ErrorBoundary extends React.Component<
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <SessionProvider>
-        <NotebookProvider>
-          <FileBrowserProvider>
-            <App />
-          </FileBrowserProvider>
-        </NotebookProvider>
-      </SessionProvider>
+      <NotebookProvider>
+        <FileBrowserProvider>
+          <GitPanelProvider>
+            <SessionProvider>
+              <App />
+            </SessionProvider>
+          </GitPanelProvider>
+        </FileBrowserProvider>
+      </NotebookProvider>
     </ErrorBoundary>
   </React.StrictMode>
 )
