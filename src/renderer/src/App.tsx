@@ -16,8 +16,15 @@ import { useResizable, ResizeHandle } from './hooks/useResizable'
 const NotebookView = lazy(() => import('./components/NotebookView').then(m => ({ default: m.NotebookView })))
 const FileView = lazy(() => import('./components/FileView').then(m => ({ default: m.FileView })))
 
+// The most informative bit of a failed session's output is usually its last
+// non-empty line (e.g. "bash: claude: command not found").
+function lastLine(text: string): string {
+  const line = text.split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? ''
+  return line.length > 120 ? line.slice(-120) : line
+}
+
 export function App() {
-  const { sessions, activeId, paneIdsFor, visiblePanesFor, addPane, removePane } = useSessions()
+  const { sessions, activeId, paneIdsFor, visiblePanesFor, addPane, removePane, closeSession, relaunchSession } = useSessions()
   const { browsers, closeFile, setActiveTab, setFileDirty } = useFileBrowser()
   const { open: gitOpen } = useGitPanel()
   const gitPanelOpen = activeId ? (gitOpen[activeId] ?? false) : false
@@ -34,7 +41,12 @@ export function App() {
   const [splitView, setSplitView] = useState(() => localStorage.getItem('cm.splitView') === '1')
   const toggleSplit = () => setSplitView((v) => { localStorage.setItem('cm.splitView', v ? '0' : '1'); return !v })
   const splitActive = splitView && !claudeActive && openFiles.length > 0
-  const claudeVisible = claudeActive || splitActive
+  // Strip mode: a file tab is active and split is off, so Claude sits below the
+  // file as a narrow horizontal strip — enough to chat about the open file
+  // without giving up the file's real estate. Off in split (Claude gets its own
+  // column) and on the Claude tab (Claude is full-size).
+  const stripActive = !claudeActive && !splitView && openFiles.length > 0
+  const claudeVisible = claudeActive || splitActive || stripActive
 
   const sidebar = useResizable({ storageKey: 'cm.sidebarW', initial: 208, min: 160, max: 480, edge: 'right' })
   const fileBrowser = useResizable({
@@ -55,6 +67,12 @@ export function App() {
     storageKey: 'cm.claudePaneW',
     initial: Math.round(window.innerWidth * 0.45), min: 280,
     max: () => Math.round(window.innerWidth * 0.75), edge: 'right',
+  })
+  // Height of the Claude strip below the file in strip mode.
+  const claudeStrip = useResizable({
+    storageKey: 'cm.claudeStripH',
+    initial: Math.round(window.innerHeight * 0.25), min: 80,
+    max: () => Math.round(window.innerHeight * 0.7), edge: 'top',
   })
   const showPane = !!(activeId && claudeActive && visiblePanesFor(activeId).length)
   const anyPanes = sessions.some((s) => paneIdsFor(s.id).length > 0)
@@ -88,7 +106,7 @@ export function App() {
               />
             )}
 
-            <div className="flex-1 flex overflow-hidden min-h-0">
+            <div className={`flex-1 flex overflow-hidden min-h-0 ${stripActive ? 'flex-col' : ''}`}>
               {sessions.length === 0 ? (
                 <div className="flex-1 flex flex-col items-center justify-center gap-3 text-ctp-overlay select-none">
                   <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -99,16 +117,43 @@ export function App() {
                 </div>
               ) : (
                 <>
-                  {/* Claude pane: full-width on the Claude tab, the left column in split mode.
-                      All sessions' terminals stay mounted; only the active one is shown. */}
+                  {/* Claude pane: full-width on the Claude tab, the left column in split
+                      mode, a narrow strip below the file in strip mode. All sessions'
+                      terminals stay mounted; only the active one is shown. In strip mode
+                      `order-last` moves it below the file without moving it in the DOM,
+                      so the terminal keeps its scrollback. */}
                   <div
-                    className={`relative overflow-hidden min-w-0 ${claudeVisible ? '' : 'hidden'} ${splitActive ? 'shrink-0' : 'flex-1'}`}
-                    style={splitActive ? { width: claudePane.size } : undefined}
+                    className={`relative overflow-hidden min-w-0 ${claudeVisible ? '' : 'hidden'} ${claudeActive ? 'flex-1' : 'shrink-0'} ${stripActive ? 'order-last' : ''}`}
+                    style={splitActive ? { width: claudePane.size } : stripActive ? { height: claudeStrip.size } : undefined}
                   >
                     {sessions.map((s) => {
                       const visible = s.id === activeId && claudeVisible
                       return (
                         <div key={s.id} className={`absolute inset-0 ${visible ? 'block' : 'hidden'}`}>
+                          {s.state === 'exited' && (
+                            <div className="absolute top-0 inset-x-0 z-10 flex items-start gap-2 px-3 py-2 bg-ctp-yellow/10 border-b border-ctp-yellow/40 text-xs text-ctp-yellow">
+                              <span className="mt-0.5">⚠</span>
+                              <span className="flex-1 min-w-0">
+                                Claude isn’t running{s.remoteId ? ' on this remote' : ''}
+                                {s.exitError ? ` — ${lastLine(s.exitError)}` : ''}.
+                                {' '}The file browser, git panel, and terminals still work; install{' '}
+                                <code className="px-1 rounded bg-ctp-surface0 text-ctp-text">claude</code>
+                                {s.remoteId ? ' on the remote' : ''}, then Retry.
+                              </span>
+                              <button
+                                onClick={() => relaunchSession(s.id)}
+                                className="shrink-0 px-2 py-0.5 rounded bg-ctp-yellow/20 hover:bg-ctp-yellow/30 text-ctp-yellow font-medium"
+                              >
+                                Retry
+                              </button>
+                              <button
+                                onClick={() => closeSession(s.id)}
+                                className="shrink-0 px-2 py-0.5 rounded bg-ctp-surface0 hover:bg-ctp-surface1 text-ctp-subtext"
+                              >
+                                Close
+                              </button>
+                            </div>
+                          )}
                           <TerminalView sessionId={s.id} isActive={visible} />
                         </div>
                       )
@@ -116,10 +161,12 @@ export function App() {
                   </div>
 
                   {splitActive && <ResizeHandle axis="x" {...claudePane.handleProps} />}
+                  {stripActive && <ResizeHandle axis="y" {...claudeStrip.handleProps} />}
 
                   {/* File/notebook pane: full-width when a file tab is active (and not split),
-                      the right column in split mode. Hidden on the Claude tab. */}
-                  <div className={`relative overflow-hidden flex-1 min-w-0 ${claudeActive ? 'hidden' : ''}`}>
+                      the right column in split mode, the top region above the Claude strip in
+                      strip mode. Hidden on the Claude tab. */}
+                  <div className={`relative overflow-hidden flex-1 min-w-0 ${claudeActive ? 'hidden' : ''} ${stripActive ? 'order-first' : ''}`}>
                     {sessions.map((s) =>
                       (browsers[s.id]?.openFiles ?? []).map((f) => {
                         const visible = s.id === activeId && browsers[s.id]?.activeTab === f.path

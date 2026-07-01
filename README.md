@@ -166,6 +166,62 @@ requires the `autocutsel` package above.
 > **GPU crashes on a bare headless box?** Add `--disable-gpu` to the `dev`
 > script in `package.json` (it already passes `--no-sandbox`).
 
+## Local GUI → remote session (SSH)
+
+The reverse of the VNC setup above: run ClaudeMaster **on your laptop** but have a
+session's work — the Claude terminal, extra panes, the file browser, the git
+panel, and Jupyter — all execute on a **remote host** over SSH. This is the VS
+Code Remote-SSH model. The GUI stays local; each remote session's processes and
+files live on the remote.
+
+### Prerequisites (on the remote)
+
+- **Key/agent auth.** ClaudeMaster never prompts for a password — it relies on
+  your SSH keys / agent / `~/.ssh/config`. Make sure `ssh <host>` works
+  non-interactively from a terminal first.
+- **First connection.** Connect once from a terminal (`ssh <host>`) so the host
+  key is trusted, or add `StrictHostKeyChecking=accept-new` to the remote's SSH
+  options (below). Background file/git calls use batch mode and will fail on an
+  unknown host key.
+- **GNU coreutils** (Linux remote): `find`, `stat`, `base64`, `cp`, `mv`, etc.
+  (macOS remotes aren't supported yet — BSD `find` differs.)
+- **`claude`** on the remote's login `PATH` — needed for the Claude terminal
+  itself. If it's missing, the session still opens and the file browser, git
+  panel, and terminals all work; the Claude pane shows "Claude isn't running…"
+  with a **Retry** (install `claude` on the remote, then click Retry — no need to
+  recreate the session).
+- **`python3 -m jupyter`** on the remote, only if you open notebooks there.
+
+### Add a remote
+
+Click **+ New Session → Manage remotes…**, then **Add remote**:
+
+| Field | Example | Notes |
+|-------|---------|-------|
+| Label | `gpu-box` | Shown on sessions from this host. |
+| SSH host | `me@gpu-box` | Anything `ssh` accepts — `user@host` or a `~/.ssh/config` alias. |
+| Start folder | _(blank)_ | Optional. Where the folder picker opens; blank = the remote's home directory. |
+| SSH options | `-p 2222 -i ~/.ssh/id_ed25519` | Extra `ssh` args (`-p`, `-i`, `-J` jump host, `-o …`). |
+
+Hit **Test connection** to confirm reachability + auth, then **Save**.
+
+### Start a remote session
+
+**+ New Session** now lists **Local…** plus each saved remote. Pick a remote and
+the folder picker opens on the remote filesystem (starting at its home directory,
+or the optional start folder) — browse to the project folder and confirm. The
+session (and everything in it) runs there. Remote sessions carry a small host
+badge in the sidebar, and restore on relaunch just like local ones. Subsessions
+of a remote session are remote too.
+
+Under the hood, ssh connection multiplexing (`ControlMaster`) keeps one connection
+warm per host, so file navigation and git refreshes stay snappy after the first
+connect.
+
+> **Remote delete is not always recoverable.** Local deletes go to the OS trash;
+> on a remote, ClaudeMaster uses `gio trash` when available and otherwise falls
+> back to `rm -rf`. Treat remote deletes as permanent unless `gio` is installed.
+
 ## Linux: sandbox note
 
 On some Linux systems (e.g. without user namespaces enabled) Electron's sandbox will fail to launch. The dev script already passes `--no-sandbox` to work around this. If you hit a sandbox error in a production build, run the output binary with `--no-sandbox`:

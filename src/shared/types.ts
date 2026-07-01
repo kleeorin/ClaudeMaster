@@ -1,4 +1,7 @@
-export type SessionState = 'idle' | 'running' | 'waiting'
+// 'exited' is a renderer-only terminal state: the process died so quickly after
+// launch that it never really started (e.g. `claude: command not found` on a
+// remote). We keep the row and show the error instead of silently removing it.
+export type SessionState = 'idle' | 'running' | 'waiting' | 'exited'
 
 export interface SessionInfo {
   id: string
@@ -6,7 +9,9 @@ export interface SessionInfo {
   cwd: string        // where Claude runs (a subsession shares its parent's cwd)
   rootDir: string    // root for the terminal pane + file browser (a subdir for subsessions)
   parentId?: string  // set on subsessions; points at the owning session
+  remoteId?: string  // set when the session runs on a remote host (see RemoteConfig)
   state: SessionState
+  exitError?: string // last output when state === 'exited' (why it failed to start)
 }
 
 export interface SavedSession {
@@ -16,7 +21,25 @@ export interface SavedSession {
   parentIndex?: number   // index of the parent within the saved array (subsessions only)
   paneCount?: number     // number of stacked terminal panes to restore
   hasPane?: boolean      // legacy: single pane (older saves); read as paneCount 1
+  remoteId?: string      // remote host this session runs on (local when absent)
 }
+
+// --- Remotes -----------------------------------------------------------------
+
+// A saved SSH remote. `host` is anything ssh accepts as a destination
+// (user@host, or a Host alias from ~/.ssh/config). `sshOptions` are extra argv
+// passed before the destination (e.g. ['-p','2222'], ['-i','~/key'], ['-J','jump']).
+export interface RemoteConfig {
+  id: string
+  label: string
+  host: string
+  defaultDir: string
+  sshOptions?: string[]
+}
+
+// cwd/rootDir strings for remote sessions are encoded as `remote://<id>/<abs>`
+// (see main/remotePath.ts); this keeps the whole fs/git IPC surface path-only.
+export type RemoteTest = { ok: true } | { ok: false; error: string }
 
 export interface DirEntry {
   name: string

@@ -1,4 +1,4 @@
-import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches } from '../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -6,12 +6,21 @@ declare global {
       session: {
         create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean) => Promise<string>
         destroy: (id: string) => Promise<void>
+        relaunch: (id: string) => Promise<boolean>
         list: () => Promise<SessionInfo[]>
         sendInput: (id: string, data: string) => void
         resize: (id: string, cols: number, rows: number) => void
         loadSaved: () => Promise<SavedSession[]>
         saveState: (sessions: SavedSession[]) => Promise<void>
         autosave: (sessions: SavedSession[]) => Promise<void>
+      }
+      remotes: {
+        list: () => Promise<RemoteConfig[]>
+        add: (input: Omit<RemoteConfig, 'id'>) => Promise<RemoteConfig>
+        update: (remote: RemoteConfig) => Promise<void>
+        remove: (id: string) => Promise<void>
+        test: (remote: RemoteConfig) => Promise<RemoteTest>
+        homeDir: (remote: RemoteConfig) => Promise<string>
       }
       pane: {
         create: (cwd: string) => Promise<string>
@@ -43,8 +52,8 @@ declare global {
         setAttention: (count: number) => Promise<void>
       }
       jupyter: {
-        start: () => Promise<{ url: string; token: string } | null>
-        install: () => Promise<boolean>
+        start: (dir?: string) => Promise<{ url: string; token: string } | null>
+        install: (dir?: string) => Promise<boolean>
       }
       git: {
         status: (dir: string) => Promise<GitStatus>
@@ -65,7 +74,7 @@ declare global {
       on: {
         output: (cb: (id: string, data: string) => void) => () => void
         stateChange: (cb: (id: string, state: string) => void) => () => void
-        exit: (cb: (id: string) => void) => () => void
+        exit: (cb: (id: string, failedFast: boolean, error: string) => void) => () => void
         paneOutput: (cb: (id: string, data: string) => void) => () => void
         paneExit: (cb: (id: string) => void) => () => void
         requestSave: (cb: () => void) => () => void

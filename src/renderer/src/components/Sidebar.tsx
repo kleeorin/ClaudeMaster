@@ -1,13 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useSessions } from '../store/sessions'
 import { useFileBrowser } from '../store/fileBrowser'
 import { useNotebooks } from '../store/notebooks'
-import type { SessionInfo } from '../../../shared/types'
+import { RemotesModal } from './RemotesModal'
+import { RemoteDirPicker } from './RemoteDirPicker'
+import { parseTarget } from '../../../shared/remotePath'
+import type { SessionInfo, RemoteConfig } from '../../../shared/types'
 
 const STATE_CLASS: Record<SessionInfo['state'], string> = {
   idle:    'bg-[#6e5800]',
   running: 'bg-ctp-green',
   waiting: 'bg-ctp-red animate-blink',
+  exited:  'bg-ctp-overlay',
 }
 
 // A notebook executing in this session takes over the dot with a flashing green,
@@ -25,9 +29,16 @@ interface Menu {
   session: SessionInfo
 }
 
+interface DirPick {
+  remote: RemoteConfig
+  initialDir: string
+  title: string
+  onChoose: (dir: string) => void
+}
+
 export function Sidebar({ width }: { width?: number }) {
   const {
-    sessions, activeId, attention, createSession, addSubsession, closeSession, setActive,
+    sessions, activeId, attention, createSession, createRemoteSession, addSubsession, closeSession, setActive,
     notifyEnabled, soundEnabled, setNotifyEnabled, setSoundEnabled,
   } = useSessions()
   const { browsers } = useFileBrowser()
@@ -38,7 +49,47 @@ export function Sidebar({ width }: { width?: number }) {
       (f) => f.isNotebook && notebooks[f.path]?.kernelStatus === 'busy',
     )
   const [menu, setMenu] = useState<Menu | null>(null)
+  const [newMenu, setNewMenu] = useState(false)
+  const [remotes, setRemotes] = useState<RemoteConfig[]>([])
+  const [showRemotes, setShowRemotes] = useState(false)
+  const [dirPick, setDirPick] = useState<DirPick | null>(null)
   const attentionCount = Object.keys(attention).length
+
+  const loadRemotes = useCallback(async () => {
+    setRemotes(await window.api.remotes.list())
+  }, [])
+  useEffect(() => { void loadRemotes() }, [loadRemotes])
+
+  const remoteLabel = (id?: string) => remotes.find((r) => r.id === id)?.label
+
+  // Start a new session on `remote`: pick a directory on that host, then create.
+  const startRemoteSession = (remote: RemoteConfig) => {
+    setNewMenu(false)
+    setDirPick({
+      remote,
+      // Empty hint → the picker starts from the remote's live home directory and
+      // you browse to the project folder (nothing decided a priori).
+      initialDir: remote.defaultDir,
+      title: 'New session — choose a folder',
+      onChoose: (dir) => { setDirPick(null); void createRemoteSession(remote, dir) },
+    })
+  }
+
+  // "Add Subsession": remote parents need the remote folder picker; local parents
+  // use the native dialog inside addSubsession.
+  const startSubsession = (session: SessionInfo) => {
+    const remote = remotes.find((r) => r.id === session.remoteId)
+    if (remote) {
+      setDirPick({
+        remote,
+        initialDir: parseTarget(session.rootDir).path,
+        title: 'Add subsession — choose a folder',
+        onChoose: (dir) => { setDirPick(null); void addSubsession(session.id, dir) },
+      })
+    } else {
+      void addSubsession(session.id)
+    }
+  }
 
   // Dismiss the context menu on any outside interaction.
   useEffect(() => {
@@ -54,6 +105,19 @@ export function Sidebar({ width }: { width?: number }) {
       window.removeEventListener('keydown', onKey)
     }
   }, [menu])
+
+  // Close the New Session dropdown on any outside click / Escape.
+  useEffect(() => {
+    if (!newMenu) return
+    const close = () => setNewMenu(false)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setNewMenu(false) }
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [newMenu])
 
   const openMenu = (ev: React.MouseEvent, session: SessionInfo) => {
     ev.preventDefault()
@@ -147,7 +211,22 @@ export function Sidebar({ width }: { width?: number }) {
           >
             {depth > 0 && <span className="shrink-0 text-ctp-overlay text-xs leading-none">↳</span>}
             <StatusDot state={s.state} notebookRunning={hasRunningNotebook(s.id)} />
-            <span className="flex-1 truncate" title={s.parentId ? s.rootDir : s.cwd}>{s.name}</span>
+            <span
+              className="flex-1 truncate"
+              title={s.state === 'exited'
+                ? `Claude not running${s.exitError ? ` — ${s.exitError}` : ''}`
+                : (s.parentId ? s.rootDir : s.cwd)}
+            >
+              {s.name}
+            </span>
+            {s.remoteId && (
+              <span
+                title={`Remote: ${remoteLabel(s.remoteId) ?? s.remoteId}`}
+                className="shrink-0 max-w-16 truncate px-1 rounded bg-ctp-surface1 text-ctp-blue text-[9px] leading-4 font-medium"
+              >
+                {remoteLabel(s.remoteId) ?? 'ssh'}
+              </span>
+            )}
             {attention[s.id] && (
               <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-ctp-mauve group-hover:hidden" title="Needs you" />
             )}
@@ -166,14 +245,58 @@ export function Sidebar({ width }: { width?: number }) {
         )}
       </div>
 
-      <div className="p-2 border-t border-ctp-surface0">
+      <div className="p-2 border-t border-ctp-surface0 relative">
+        {newMenu && (
+          <div
+            className="absolute bottom-full left-2 right-2 mb-1 bg-ctp-surface0 border border-ctp-surface1 rounded shadow-lg py-1 select-none z-50"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => { setNewMenu(false); void createSession() }}
+              className="w-full text-left px-3 py-1.5 text-xs text-ctp-text hover:bg-ctp-surface1 transition-colors"
+            >
+              Local…
+            </button>
+            {remotes.length > 0 && <div className="mx-2 my-0.5 border-t border-ctp-surface1" />}
+            {remotes.map((r) => (
+              <button
+                key={r.id}
+                onClick={() => startRemoteSession(r)}
+                className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs text-ctp-text hover:bg-ctp-surface1 transition-colors"
+              >
+                <span className="text-ctp-blue">🖧</span>
+                <span className="truncate">{r.label}</span>
+              </button>
+            ))}
+            <div className="mx-2 my-0.5 border-t border-ctp-surface1" />
+            <button
+              onClick={() => { setNewMenu(false); setShowRemotes(true) }}
+              className="w-full text-left px-3 py-1.5 text-xs text-ctp-subtext hover:bg-ctp-surface1 transition-colors"
+            >
+              Manage remotes…
+            </button>
+          </div>
+        )}
         <button
-          onClick={createSession}
+          onClick={(e) => { e.stopPropagation(); setNewMenu((v) => !v) }}
           className="w-full px-3 py-2 text-sm text-ctp-overlay hover:text-ctp-text hover:bg-ctp-surface0 rounded transition-colors border border-ctp-surface0 hover:border-ctp-surface1"
         >
           + New Session
         </button>
       </div>
+
+      {showRemotes && (
+        <RemotesModal onClose={() => setShowRemotes(false)} onChanged={loadRemotes} />
+      )}
+      {dirPick && (
+        <RemoteDirPicker
+          remote={dirPick.remote}
+          initialDir={dirPick.initialDir}
+          title={dirPick.title}
+          onChoose={dirPick.onChoose}
+          onCancel={() => setDirPick(null)}
+        />
+      )}
 
       {menu && (
         <div
@@ -182,7 +305,7 @@ export function Sidebar({ width }: { width?: number }) {
           onClick={(e) => e.stopPropagation()}
         >
           <button
-            onClick={() => { setMenu(null); addSubsession(menu.session.id) }}
+            onClick={() => { const s = menu.session; setMenu(null); startSubsession(s) }}
             className="w-full text-left px-3 py-1.5 text-xs text-ctp-text hover:bg-ctp-surface1 transition-colors"
           >
             Add Subsession

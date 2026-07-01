@@ -8,7 +8,8 @@ import {
   useRef,
   type ReactNode,
 } from 'react'
-import type { SessionInfo, SessionState, SavedSession } from '../../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, RemoteConfig } from '../../../shared/types'
+import { makeRemotePath } from '../../../shared/remotePath'
 import { playChime } from '../lib/chime'
 import { useNotebooks } from './notebooks'
 
@@ -20,12 +21,17 @@ const isUnder = (path: string, root: string) =>
 // index into this array (ids are regenerated on restore); a subsession always
 // follows its parent, so the index is always already known on the way back in.
 function serialize(sessions: SessionInfo[], panes: Record<string, string[]>): SavedSession[] {
-  return sessions.map((s) => ({
+  // Don't persist a failed-to-start session — restoring it would just re-run the
+  // same broken command and fail again. parentIndex is resolved against this same
+  // filtered list so the saved indices stay consistent on restore.
+  const live = sessions.filter((s) => s.state !== 'exited')
+  return live.map((s) => ({
     name: s.name,
     cwd: s.cwd,
     rootDir: s.rootDir,
-    parentIndex: s.parentId ? sessions.findIndex((p) => p.id === s.parentId) : undefined,
+    parentIndex: s.parentId ? live.findIndex((p) => p.id === s.parentId) : undefined,
     paneCount: panes[s.id]?.length ?? 0,
+    remoteId: s.remoteId,
   }))
 }
 
@@ -42,6 +48,7 @@ type Action =
   | { type: 'ADD'; session: SessionInfo; paneIds?: string[] }
   | { type: 'REMOVE'; id: string }
   | { type: 'STATE_CHANGE'; id: string; state: SessionState }
+  | { type: 'EXITED'; id: string; error: string }
   | { type: 'SET_ACTIVE'; id: string }
   | { type: 'ADD_ATTENTION'; id: string }
   | { type: 'ADD_PANE'; sessionId: string; paneId: string; afterPaneId?: string }
@@ -91,7 +98,18 @@ function reducer(state: State, action: Action): State {
       return {
         ...state,
         sessions: state.sessions.map((s) =>
-          s.id === action.id ? { ...s, state: action.state } : s
+          // Leaving 'exited' (e.g. a successful relaunch) clears the stored error.
+          s.id === action.id
+            ? { ...s, state: action.state, exitError: action.state === 'exited' ? s.exitError : undefined }
+            : s
+        ),
+      }
+    case 'EXITED':
+      // Keep the row; mark it failed and stash the reason for the banner/tooltip.
+      return {
+        ...state,
+        sessions: state.sessions.map((s) =>
+          s.id === action.id ? { ...s, state: 'exited', exitError: action.error } : s
         ),
       }
     case 'SET_ACTIVE':
@@ -142,7 +160,9 @@ function reducer(state: State, action: Action): State {
 
 interface ContextValue extends State {
   createSession: () => Promise<void>
-  addSubsession: (parentId: string) => Promise<void>
+  createRemoteSession: (remote: RemoteConfig, dir: string) => Promise<void>
+  relaunchSession: (id: string) => Promise<void>
+  addSubsession: (parentId: string, dir?: string) => Promise<void>
   closeSession: (id: string) => Promise<void>
   setActive: (id: string) => void
   openPane: (sessionId: string) => Promise<void>
@@ -250,7 +270,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           }
           dispatch({
             type: 'ADD',
-            session: { id, name: s.name, cwd: s.cwd, rootDir, parentId, state: 'idle' },
+            session: { id, name: s.name, cwd: s.cwd, rootDir, parentId, remoteId: s.remoteId, state: 'idle' },
             paneIds,
           })
         }
@@ -278,8 +298,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // focused window.
       if (!isActive || !document.hasFocus()) notify(id, prev.name, next)
     })
-    const offExit = window.api.on.exit((id) => {
-      dispatch({ type: 'REMOVE', id })
+    const offExit = window.api.on.exit((id, failedFast, error) => {
+      // A session that died at startup stays put with its error visible; a normal
+      // exit (you finished the session) is removed as before.
+      if (failedFast) {
+        dispatch({ type: 'EXITED', id, error })
+        // Flag it for attention unless you're already looking at it.
+        if (stateRef.current.activeId !== id) dispatch({ type: 'ADD_ATTENTION', id })
+      } else {
+        dispatch({ type: 'REMOVE', id })
+      }
     })
     const offPaneExit = window.api.on.paneExit((paneId) => {
       dispatch({ type: 'REMOVE_PANE', paneId })
@@ -306,18 +334,36 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, state: 'idle' } })
   }, [])
 
+  // Start a session on a remote host. `dir` is a plain absolute path on that host;
+  // we encode it as remote://id/dir so every downstream fs/git call routes over
+  // ssh to the right box (see shared/remotePath.ts).
+  const createRemoteSession = useCallback(async (remote: RemoteConfig, dir: string) => {
+    const cwd = makeRemotePath(remote.id, dir)
+    const name = dir.split('/').filter(Boolean).pop() || remote.label
+    const id = await window.api.session.create(name, cwd, cwd)
+    dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, remoteId: remote.id, state: 'idle' } })
+  }, [])
+
   // A subsession runs its own Claude in the parent's directory, but scopes its
   // terminal pane and file browser to a chosen subdirectory of that directory.
-  const addSubsession = useCallback(async (parentId: string) => {
+  // For a remote parent the local dir dialog can't browse the remote, so the
+  // caller (Sidebar) supplies `dir` — a plain path on the remote — via the remote
+  // folder picker; local parents fall back to the native dialog.
+  const addSubsession = useCallback(async (parentId: string, dir?: string) => {
     const parent = stateRef.current.sessions.find((s) => s.id === parentId)
     if (!parent) return
-    const rootDir = await window.api.dialog.openDir(parent.cwd)
-    if (!rootDir) return
-    const name = rootDir.split('/').pop() || 'Subsession'
+    let picked = dir
+    if (!picked) {
+      if (parent.remoteId) return  // remote needs an explicit dir from the picker
+      picked = (await window.api.dialog.openDir(parent.cwd)) ?? undefined
+      if (!picked) return
+    }
+    const rootDir = parent.remoteId ? makeRemotePath(parent.remoteId, picked) : picked
+    const name = picked.split('/').filter(Boolean).pop() || 'Subsession'
     const id = await window.api.session.create(name, parent.cwd, rootDir, parentId)
     dispatch({
       type: 'ADD',
-      session: { id, name, cwd: parent.cwd, rootDir, parentId, state: 'idle' },
+      session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, state: 'idle' },
     })
   }, [])
 
@@ -363,6 +409,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_ACTIVE', id })
   }, [])
 
+  // Retry launching Claude in an existing (exited) session — e.g. after you've
+  // installed claude on the remote. The main process re-emits the state, which
+  // clears the 'exited' status via STATE_CHANGE.
+  const relaunchSession = useCallback(async (id: string) => {
+    await window.api.session.relaunch(id)
+  }, [])
+
   // Spawn a new terminal in this session's stack. `afterPaneId` inserts the new
   // terminal directly below the given one (the "+" on a specific terminal);
   // omit it to append at the bottom.
@@ -403,7 +456,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   return (
     <SessionContext.Provider value={{
-      ...state, createSession, addSubsession, closeSession, setActive,
+      ...state, createSession, createRemoteSession, relaunchSession, addSubsession, closeSession, setActive,
       openPane, addPane, removePane, closePane, paneIdsFor, visiblePanesFor,
       notifyEnabled, soundEnabled, setNotifyEnabled, setSoundEnabled,
     }}>

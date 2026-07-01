@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches } from '../shared/types'
+import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest } from '../shared/types'
 
 contextBridge.exposeInMainWorld('api', {
   session: {
@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('session:create', name, cwd, rootDir, parentId, resume),
     destroy: (id: string): Promise<void> =>
       ipcRenderer.invoke('session:destroy', id),
+    relaunch: (id: string): Promise<boolean> =>
+      ipcRenderer.invoke('session:relaunch', id),
     list: (): Promise<SessionInfo[]> =>
       ipcRenderer.invoke('session:list'),
     sendInput: (id: string, data: string): void =>
@@ -19,6 +21,20 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('session:save-state', saved),
     autosave: (saved: SavedSession[]): Promise<void> =>
       ipcRenderer.invoke('session:autosave', saved),
+  },
+  remotes: {
+    list: (): Promise<RemoteConfig[]> =>
+      ipcRenderer.invoke('remotes:list'),
+    add: (input: Omit<RemoteConfig, 'id'>): Promise<RemoteConfig> =>
+      ipcRenderer.invoke('remotes:add', input),
+    update: (remote: RemoteConfig): Promise<void> =>
+      ipcRenderer.invoke('remotes:update', remote),
+    remove: (id: string): Promise<void> =>
+      ipcRenderer.invoke('remotes:remove', id),
+    test: (remote: RemoteConfig): Promise<RemoteTest> =>
+      ipcRenderer.invoke('remotes:test', remote),
+    homeDir: (remote: RemoteConfig): Promise<string> =>
+      ipcRenderer.invoke('remotes:homeDir', remote),
   },
   pane: {
     create: (cwd: string): Promise<string> =>
@@ -69,10 +85,12 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('app:setAttention', count),
   },
   jupyter: {
-    start: (): Promise<{ url: string; token: string } | null> =>
-      ipcRenderer.invoke('jupyter:start'),
-    install: (): Promise<boolean> =>
-      ipcRenderer.invoke('jupyter:install'),
+    // `dir` (the notebook's directory, possibly remote-encoded) selects which
+    // host's Jupyter server to use; omit for the local server.
+    start: (dir?: string): Promise<{ url: string; token: string } | null> =>
+      ipcRenderer.invoke('jupyter:start', dir),
+    install: (dir?: string): Promise<boolean> =>
+      ipcRenderer.invoke('jupyter:install', dir),
   },
   git: {
     status: (dir: string): Promise<GitStatus> =>
@@ -115,8 +133,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.on('session:stateChange', h)
       return () => ipcRenderer.removeListener('session:stateChange', h)
     },
-    exit: (cb: (id: string) => void): (() => void) => {
-      const h = (_: unknown, id: string) => cb(id)
+    exit: (cb: (id: string, failedFast: boolean, error: string) => void): (() => void) => {
+      const h = (_: unknown, id: string, failedFast: boolean, error: string) => cb(id, failedFast, error)
       ipcRenderer.on('session:exit', h)
       return () => ipcRenderer.removeListener('session:exit', h)
     },

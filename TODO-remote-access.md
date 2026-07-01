@@ -38,8 +38,38 @@ work to happen.
 4. **Docs** — add a "Remote access" section to `README.md` and optionally a
    `dev:remote` npm script that calls `./launch-remote`.
 
-## Alternative (not pursued)
+## Local GUI → remote session over SSH (DONE)
+
+The "alternative" below — run Electron locally, each session ssh's into the
+remote — is now implemented (VS Code Remote-SSH model). See README "Local GUI →
+remote session (SSH)". Summary of the design:
+
+- **Remote-path scheme** (`shared/remotePath.ts`): remote dirs are encoded as
+  `remote://<remoteId>/abs/path`, so the whole fs/git IPC surface stays
+  path-only; a single `parseTarget` at each main-process boundary routes
+  local vs remote.
+- **SSH transport** (`main/ssh.ts`): shell-quoting + `ControlMaster` connection
+  multiplexing (fs/git polling would be unusable otherwise). Batch mode for
+  fs/git/test; interactive (`-tt`) for session/pane ptys.
+- **Saved remotes** (`main/remotes.ts`, `remotes.json`): CRUD + `test`,
+  managed via the RemotesModal; picked from the New Session menu.
+- **Sessions/panes**: `ssh -tt host 'exec $SHELL -lc "cd <dir> && exec claude"'`
+  — pty stays local, so the terminal state detection is unchanged.
+- **Filesystem** (`main/remoteFs.ts`): each fs:* handler mirrored over ssh
+  (find/stat/cat/base64/cp/mv/mkdir/…).
+- **Git** (`main/gitManager.ts`): the `git()` runner routes through ssh; output
+  parsing untouched.
+- **Jupyter** (`main/jupyterManager.ts`): per-remote server, started over ssh
+  with an `-L` tunnel; renderer still talks to a localhost port.
+
+### Still to do / limitations
+
+- macOS remotes (BSD `find`/`stat` differ from the assumed GNU coreutils).
+- Remote delete uses `gio trash` → `rm -rf` fallback (may be permanent).
+- `shell.openPath` ("open externally") doesn't work for remote files.
+- No in-app password/2FA auth — relies on keys/agent/ssh-config.
+
+## Alternative (not pursued — superseded by the above)
 
 Run Electron locally and have each session `ssh` into the remote + tunnel
-Jupyter ports. Rejected because sessions/Jupyter are currently spawned on the
-main-process host, so this would need session-spawning changes to be useful.
+Jupyter ports. (Now pursued and implemented — see above.)

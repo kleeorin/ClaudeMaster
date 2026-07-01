@@ -1,21 +1,37 @@
 import { EventEmitter } from 'events'
 import * as pty from 'node-pty'
 import { homedir } from 'os'
+import type { RemoteConfig } from '../shared/types'
+import { parseTarget } from './remotePath'
+import * as ssh from './ssh'
 
 export class PaneManager extends EventEmitter {
   private panes = new Map<string, pty.IPty>()
 
-  create(cwd: string): string {
+  // `cwd` may be remote-encoded; with `remote` set the pane is a login shell on
+  // that host over ssh (the stripped path is the remote working directory).
+  create(cwd: string, remote?: RemoteConfig): string {
     const id = crypto.randomUUID()
     const shell = process.env.SHELL || '/bin/bash'
 
-    const ptyProcess = pty.spawn(shell, [], {
-      name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
-      cwd: cwd || homedir(),
-      env: process.env as Record<string, string>,
-    })
+    const ptyProcess = remote
+      ? pty.spawn('ssh', ssh.interactiveArgs(
+          remote,
+          `cd ${ssh.shquote(parseTarget(cwd).path || '.')} && exec "\${SHELL:-bash}" -l`,
+        ), {
+          name: 'xterm-256color',
+          cols: 80,
+          rows: 24,
+          cwd: homedir(),
+          env: process.env as Record<string, string>,
+        })
+      : pty.spawn(shell, [], {
+          name: 'xterm-256color',
+          cols: 80,
+          rows: 24,
+          cwd: cwd || homedir(),
+          env: process.env as Record<string, string>,
+        })
 
     this.panes.set(id, ptyProcess)
     ptyProcess.onData((data) => this.emit('output', id, data))

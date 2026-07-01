@@ -8,7 +8,10 @@ import { PaneManager } from './paneManager'
 import { JupyterManager } from './jupyterManager'
 import * as gitManager from './gitManager'
 import { saveState, loadState } from './sessionPersistence'
-import type { SavedSession } from '../shared/types'
+import * as remotes from './remotes'
+import * as remoteFs from './remoteFs'
+import { parseTarget } from './remotePath'
+import type { RemoteConfig, SavedSession } from '../shared/types'
 
 const sessions = new SessionManager()
 const panes = new PaneManager()
@@ -51,8 +54,8 @@ function createWindow(): void {
   sessions.on('stateChange', (id: string, state: string) => {
     mainWindow?.webContents.send('session:stateChange', id, state)
   })
-  sessions.on('exit', (id: string) => {
-    mainWindow?.webContents.send('session:exit', id)
+  sessions.on('exit', (id: string, failedFast: boolean, error: string) => {
+    mainWindow?.webContents.send('session:exit', id, failedFast, error)
   })
 
   panes.on('output', (id: string, data: string) => {
@@ -70,10 +73,20 @@ function createWindow(): void {
   }
 }
 
-ipcMain.handle('session:create', (_, name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean) =>
-  sessions.create(name, cwd, rootDir ?? cwd, parentId, resume)
+// The remote a path belongs to is encoded in the path itself (remote://id/…), so
+// every fs/git/session handler resolves it the same way. Returns undefined for
+// local paths or an unknown/stale remote id (falls back to local behavior).
+async function remoteFor(encodedPath: string): Promise<RemoteConfig | undefined> {
+  const { remoteId } = parseTarget(encodedPath)
+  if (!remoteId) return undefined
+  return (await remotes.get(remoteId)) ?? undefined
+}
+
+ipcMain.handle('session:create', async (_, name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean) =>
+  sessions.create(name, cwd, rootDir ?? cwd, parentId, resume, await remoteFor(cwd))
 )
 ipcMain.handle('session:destroy', (_, id: string) => sessions.destroy(id))
+ipcMain.handle('session:relaunch', (_, id: string) => sessions.relaunch(id))
 ipcMain.handle('session:list', () => sessions.list())
 ipcMain.handle('session:load-saved', () => loadState())
 ipcMain.handle('session:save-state', async (_, saved: SavedSession[]) => {
@@ -88,12 +101,21 @@ ipcMain.on('session:input', (_, id: string, data: string) => sessions.sendInput(
 ipcMain.on('session:resize', (_, id: string, cols: number, rows: number) =>
   sessions.resize(id, cols, rows)
 )
-ipcMain.handle('pane:create', (_, cwd: string) => panes.create(cwd))
+ipcMain.handle('remotes:list', () => remotes.list())
+ipcMain.handle('remotes:add', (_, input: Omit<RemoteConfig, 'id'>) => remotes.add(input))
+ipcMain.handle('remotes:update', (_, remote: RemoteConfig) => remotes.update(remote))
+ipcMain.handle('remotes:remove', (_, id: string) => remotes.remove(id))
+ipcMain.handle('remotes:test', (_, remote: RemoteConfig) => remotes.test(remote))
+ipcMain.handle('remotes:homeDir', (_, remote: RemoteConfig) => remotes.homeDir(remote))
+
+ipcMain.handle('pane:create', async (_, cwd: string) => panes.create(cwd, await remoteFor(cwd)))
 ipcMain.handle('pane:destroy', (_, id: string) => panes.destroy(id))
 ipcMain.on('pane:input', (_, id: string, data: string) => panes.sendInput(id, data))
 ipcMain.on('pane:resize', (_, id: string, cols: number, rows: number) => panes.resize(id, cols, rows))
 
 ipcMain.handle('fs:readDir', async (_, path: string): Promise<DirEntry[]> => {
+  const remote = await remoteFor(path)
+  if (remote) return remoteFs.readDir(remote, parseTarget(path).path)
   try {
     const entries = await readdir(path, { withFileTypes: true })
     const detailed = await Promise.all(
@@ -133,6 +155,8 @@ async function uniqueDest(destDir: string, name: string): Promise<string> {
 
 // Copy a file/dir (recursively) into destDir, never overwriting.
 ipcMain.handle('fs:copy', async (_, src: string, destDir: string): Promise<WriteResult> => {
+  const remote = await remoteFor(destDir)
+  if (remote) return remoteFs.copy(remote, parseTarget(src).path, parseTarget(destDir).path)
   try {
     await cp(src, await uniqueDest(destDir, basename(src)), { recursive: true })
     return { ok: true }
@@ -142,6 +166,8 @@ ipcMain.handle('fs:copy', async (_, src: string, destDir: string): Promise<Write
 // Move a file/dir into destDir. rename() is atomic on the same filesystem; fall
 // back to copy+remove across devices.
 ipcMain.handle('fs:move', async (_, src: string, destDir: string): Promise<WriteResult> => {
+  const remote = await remoteFor(destDir)
+  if (remote) return remoteFs.move(remote, parseTarget(src).path, parseTarget(destDir).path)
   try {
     const dest = await uniqueDest(destDir, basename(src))
     try {
@@ -156,6 +182,8 @@ ipcMain.handle('fs:move', async (_, src: string, destDir: string): Promise<Write
 
 // Delete to the OS trash (recoverable) rather than an irreversible unlink.
 ipcMain.handle('fs:delete', async (_, path: string): Promise<WriteResult> => {
+  const remote = await remoteFor(path)
+  if (remote) return remoteFs.del(remote, parseTarget(path).path)
   try {
     await shell.trashItem(path)
     return { ok: true }
@@ -164,6 +192,8 @@ ipcMain.handle('fs:delete', async (_, path: string): Promise<WriteResult> => {
 
 // Rename within the same directory; refuse to clobber an existing name.
 ipcMain.handle('fs:rename', async (_, path: string, newName: string): Promise<WriteResult> => {
+  const remote = await remoteFor(path)
+  if (remote) return remoteFs.rename(remote, parseTarget(path).path, newName)
   try {
     const dest = join(dirname(path), newName)
     if (dest === path) return { ok: true }
@@ -176,6 +206,8 @@ ipcMain.handle('fs:rename', async (_, path: string, newName: string): Promise<Wr
 
 // Create a new (empty) directory; non-recursive so it fails if it already exists.
 ipcMain.handle('fs:mkdir', async (_, path: string): Promise<WriteResult> => {
+  const remote = await remoteFor(path)
+  if (remote) return remoteFs.mkdir(remote, parseTarget(path).path)
   try {
     await mkdir(path)
     return { ok: true }
@@ -184,6 +216,8 @@ ipcMain.handle('fs:mkdir', async (_, path: string): Promise<WriteResult> => {
 
 // Create a new empty file; 'wx' fails rather than truncate an existing file.
 ipcMain.handle('fs:createFile', async (_, path: string): Promise<WriteResult> => {
+  const remote = await remoteFor(path)
+  if (remote) return remoteFs.createFile(remote, parseTarget(path).path)
   try {
     await writeFile(path, '', { flag: 'wx' })
     return { ok: true }
@@ -204,6 +238,8 @@ const IMAGE_MIME: Record<string, string> = {
 const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2 MB cap for text previews
 
 ipcMain.handle('fs:readFile', async (_, path: string): Promise<FilePreview> => {
+  const remote = await remoteFor(path)
+  if (remote) return remoteFs.readFile(remote, parseTarget(path).path)
   const name = basename(path)
   try {
     const ext = extname(path).toLowerCase()
@@ -235,6 +271,8 @@ ipcMain.handle('fs:readFile', async (_, path: string): Promise<FilePreview> => {
 // Full, untruncated UTF-8 read — used for .ipynb so notebooks round-trip without
 // the size cap / binary heuristic that fs:readFile applies for previews.
 ipcMain.handle('fs:readText', async (_, path: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> => {
+  const remote = await remoteFor(path)
+  if (remote) return remoteFs.readText(remote, parseTarget(path).path)
   try {
     const text = await readFile(path, 'utf8')
     return { ok: true, text }
@@ -244,6 +282,8 @@ ipcMain.handle('fs:readText', async (_, path: string): Promise<{ ok: true; text:
 })
 
 ipcMain.handle('fs:writeFile', async (_, path: string, content: string): Promise<WriteResult> => {
+  const remote = await remoteFor(path)
+  if (remote) return remoteFs.writeFile(remote, parseTarget(path).path, content)
   try {
     await writeFile(path, content, 'utf8')
     return { ok: true }
@@ -252,8 +292,19 @@ ipcMain.handle('fs:writeFile', async (_, path: string, content: string): Promise
   }
 })
 
-ipcMain.handle('jupyter:start', () => jupyter.start())
-ipcMain.handle('jupyter:install', () => jupyter.install())
+// One Jupyter server per host: the local one, plus a lazily-created tunneled
+// server per remote. `dir` is the notebook's (possibly remote-encoded) directory,
+// used only to pick the right server.
+const remoteJupyter = new Map<string, JupyterManager>()
+async function jupyterFor(dir?: string): Promise<JupyterManager> {
+  const remote = dir ? await remoteFor(dir) : undefined
+  if (!remote) return jupyter
+  let jm = remoteJupyter.get(remote.id)
+  if (!jm) { jm = new JupyterManager(remote); remoteJupyter.set(remote.id, jm) }
+  return jm
+}
+ipcMain.handle('jupyter:start', async (_, dir?: string) => (await jupyterFor(dir)).start())
+ipcMain.handle('jupyter:install', async (_, dir?: string) => (await jupyterFor(dir)).install())
 
 ipcMain.handle('git:status', (_, dir: string) => gitManager.status(dir))
 ipcMain.handle('git:diff', (_, dir: string, file: string, staged: boolean, untracked: boolean) =>
@@ -306,5 +357,6 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   jupyter.destroy()
+  for (const jm of remoteJupyter.values()) jm.destroy()
   if (process.platform !== 'darwin') app.quit()
 })

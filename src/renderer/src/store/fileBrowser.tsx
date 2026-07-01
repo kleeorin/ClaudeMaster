@@ -145,8 +145,10 @@ export function FileBrowserProvider({ children }: { children: ReactNode }) {
   stateRef.current = browsers
 
   useEffect(() => {
-    const offExit = window.api.on.exit((id) => {
-      dispatch({ type: 'DESTROY', sessionId: id })
+    const offExit = window.api.on.exit((id, failedFast) => {
+      // A fast Claude failure keeps the session alive (its files still work over
+      // ssh), so only tear the browser down on a real close.
+      if (!failedFast) dispatch({ type: 'DESTROY', sessionId: id })
     })
     return offExit
   }, [])

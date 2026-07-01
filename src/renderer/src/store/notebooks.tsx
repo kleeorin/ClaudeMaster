@@ -2,6 +2,7 @@ import { createContext, useContext, useReducer, useCallback, useRef, useState, t
 import { KernelClient, type CellOutput, type KernelStatus } from '../lib/kernelClient'
 import { parseNotebook, serializeNotebook, type NotebookMeta } from '../lib/ipynb'
 import { remapPath } from '../lib/paths'
+import { parseTarget } from '../../../shared/remotePath'
 import type { WriteResult } from '../../../shared/types'
 
 export type CellType = 'code' | 'markdown' | 'raw'
@@ -141,19 +142,27 @@ function reducer(state: State, action: Action): State {
 
 // Kernel clients live outside React state (not serializable), keyed by notebook path.
 const kernelClients = new Map<string, KernelClient>()
-let serverInfo: { url: string; token: string } | null = null
 
-async function getServerInfo(): Promise<{ url: string; token: string } | null> {
-  if (serverInfo) return serverInfo
-  serverInfo = await window.api.jupyter.start()
-  return serverInfo
+// One Jupyter server per host, so remote notebooks get their remote server (and
+// its kernelspecs) while local notebooks keep the local one. Keyed by remote id,
+// or 'local'. The notebook's path carries the remote (remote://id/…).
+const serverKey = (path: string) => parseTarget(path).remoteId ?? 'local'
+const serverInfos = new Map<string, { url: string; token: string } | null>()
+
+async function getServerInfo(path: string): Promise<{ url: string; token: string } | null> {
+  const key = serverKey(path)
+  if (serverInfos.has(key)) return serverInfos.get(key)!
+  const info = await window.api.jupyter.start(path)
+  serverInfos.set(key, info)
+  return info
 }
 
 interface Specs { default: string; list: KernelSpecInfo[] }
-let specsCache: Specs | null = null
+const specsCaches = new Map<string, Specs>()
 
-async function getSpecs(url: string, token: string): Promise<Specs> {
-  if (specsCache) return specsCache
+async function getSpecs(key: string, url: string, token: string): Promise<Specs> {
+  const cached = specsCaches.get(key)
+  if (cached) return cached
   const res = await fetch(`${url}/api/kernelspecs`, { headers: { Authorization: `token ${token}` } })
   const data = await res.json()
   const list: KernelSpecInfo[] = Object.values(data.kernelspecs ?? {}).map((k: any) => ({
@@ -161,17 +170,20 @@ async function getSpecs(url: string, token: string): Promise<Specs> {
     displayName: k.spec?.display_name ?? k.name,
     language: k.spec?.language ?? '',
   }))
-  specsCache = { default: data.default ?? 'python3', list }
-  return specsCache
+  const specs = { default: data.default ?? 'python3', list }
+  specsCaches.set(key, specs)
+  return specs
 }
 
 // Kernel cwd is passed to the API as a path relative to root_dir ("/"), so strip
 // the leading slash. Uses `override` (custom env dir) when set, else the
-// notebook's own directory.
+// notebook's own directory. Both are de-scheme'd first: the kernel runs on the
+// server's own host, so it needs the plain remote path, not remote://id/….
 function kernelCwdPath(notebookPath: string, override?: string | null): string {
-  const dir = override && override.length > 0
+  const raw = override && override.length > 0
     ? override
     : (notebookPath.slice(0, notebookPath.lastIndexOf('/')) || '/')
+  const dir = parseTarget(raw).path
   return dir.replace(/^\/+/, '')
 }
 
@@ -235,7 +247,7 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
   // previous kernel and setting 'starting' status.
   const startKernel = useCallback(async (path: string, specName: string, cwdOverride: string | null): Promise<boolean> => {
     try {
-      const info = await getServerInfo()
+      const info = await getServerInfo(path)
       if (!info) throw new Error('jupyter not available')
       const kernelId = await createKernel(info.url, info.token, specName, kernelCwdPath(path, cwdOverride))
       const client = new KernelClient(info.url, info.token, kernelId)
@@ -255,9 +267,9 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
   const ensureKernel = useCallback(async (path: string) => {
     if (kernelClients.has(path)) return
     dispatch({ type: 'SET_STATUS', path, status: 'starting' })
-    const info = await getServerInfo()
+    const info = await getServerInfo(path)
     if (!info) { dispatch({ type: 'SET_STATUS', path, status: 'dead' }); return }
-    const allSpecs = await getSpecs(info.url, info.token).catch(() => ({ default: 'python3', list: [] as KernelSpecInfo[] }))
+    const allSpecs = await getSpecs(serverKey(path), info.url, info.token).catch(() => ({ default: 'python3', list: [] as KernelSpecInfo[] }))
     setSpecs(allSpecs.list)
     const nb = nbRef.current[path]
     await startKernel(path, chooseSpec(nb?.meta, allSpecs), nb?.kernelCwd ?? null)
@@ -299,7 +311,7 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
     await disposeKernel(path)
     dispatch({ type: 'SET_STATUS', path, status: 'starting' })
     dispatch({ type: 'SET_KERNEL_CWD', path, cwd: null })  // back to the notebook's dir
-    const spec = specsCache?.list.find((s) => s.name === specName)
+    const spec = specsCaches.get(serverKey(path))?.list.find((s) => s.name === specName)
     dispatch({ type: 'SET_KERNELSPEC_META', path, kernelspec: { name: specName, display_name: spec?.displayName ?? specName, language: spec?.language ?? 'python' } })
     await startKernel(path, specName, null)
   }, [startKernel])
@@ -310,8 +322,9 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
     await disposeKernel(path)
     dispatch({ type: 'SET_STATUS', path, status: 'starting' })
     dispatch({ type: 'SET_KERNEL_CWD', path, cwd: dir })
-    const specName = specsCache?.list.some((s) => s.name === PREFERRED_KERNEL) ? PREFERRED_KERNEL : (specsCache?.default ?? 'python3')
-    const spec = specsCache?.list.find((s) => s.name === specName)
+    const specs = specsCaches.get(serverKey(path))
+    const specName = specs?.list.some((s) => s.name === PREFERRED_KERNEL) ? PREFERRED_KERNEL : (specs?.default ?? 'python3')
+    const spec = specs?.list.find((s) => s.name === specName)
     dispatch({ type: 'SET_KERNELSPEC_META', path, kernelspec: { name: specName, display_name: spec?.displayName ?? specName, language: spec?.language ?? 'python' } })
     await startKernel(path, specName, dir)
   }, [startKernel])
@@ -440,10 +453,12 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
 
   const installAndRetry = useCallback(async (path: string) => {
     dispatch({ type: 'SET_STATUS', path, status: 'starting' })
-    await window.api.jupyter.install()
-    // Reset cached server/spec info so the next attempt spawns a fresh server.
-    serverInfo = null
-    specsCache = null
+    await window.api.jupyter.install(path)
+    // Reset cached server/spec info for this host so the next attempt spawns a
+    // fresh server.
+    const key = serverKey(path)
+    serverInfos.delete(key)
+    specsCaches.delete(key)
     kernelClients.get(path)?.dispose()
     kernelClients.delete(path)
     await ensureKernel(path)
