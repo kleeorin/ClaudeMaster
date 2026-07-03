@@ -2,7 +2,9 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import './index.css'
 import { App } from './App'
+import { AppControlBridge } from './components/AppControlBridge'
 import { SessionProvider } from './store/sessions'
+import { ChatProvider } from './store/chat'
 import { NotebookProvider } from './store/notebooks'
 import { FileBrowserProvider } from './store/fileBrowser'
 import { GitPanelProvider } from './store/gitPanel'
@@ -38,7 +40,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <FileBrowserProvider>
           <GitPanelProvider>
             <SessionProvider>
-              <App />
+              <ChatProvider>
+                <AppControlBridge />
+                <App />
+              </ChatProvider>
             </SessionProvider>
           </GitPanelProvider>
         </FileBrowserProvider>

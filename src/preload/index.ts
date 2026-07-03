@@ -1,20 +1,41 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest } from '../shared/types'
+import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta } from '../shared/types'
 
 contextBridge.exposeInMainWorld('api', {
   session: {
-    create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean): Promise<string> =>
-      ipcRenderer.invoke('session:create', name, cwd, rootDir, parentId, resume),
+    create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string): Promise<string> =>
+      ipcRenderer.invoke('session:create', name, cwd, rootDir, parentId, resume, claudeSessionId),
     destroy: (id: string): Promise<void> =>
       ipcRenderer.invoke('session:destroy', id),
     relaunch: (id: string): Promise<boolean> =>
       ipcRenderer.invoke('session:relaunch', id),
     list: (): Promise<SessionInfo[]> =>
       ipcRenderer.invoke('session:list'),
-    sendInput: (id: string, data: string): void =>
-      ipcRenderer.send('session:input', id, data),
-    resize: (id: string, cols: number, rows: number): void =>
-      ipcRenderer.send('session:resize', id, cols, rows),
+    // Native-chat turn I/O (stream-json). `sendTurn` submits a whole user turn;
+    // `interrupt` is the Esc equivalent; `respondPermission` answers a prompt.
+    sendTurn: (id: string, text: string): void =>
+      ipcRenderer.send('session:sendTurn', id, text),
+    interrupt: (id: string): void =>
+      ipcRenderer.send('session:interrupt', id),
+    respondPermission: (id: string, requestId: string, decision: PermissionDecision): void =>
+      ipcRenderer.send('session:respondPermission', id, requestId, decision),
+    claudeId: (id: string): Promise<string | undefined> =>
+      ipcRenderer.invoke('session:claudeId', id),
+    // Native /resume: list/read past conversations, and rebind a session to one.
+    listConversations: (cwd: string): Promise<ConversationMeta[]> =>
+      ipcRenderer.invoke('session:listConversations', cwd),
+    readConversation: (cwd: string, id: string): Promise<ClaudeEvent[]> =>
+      ipcRenderer.invoke('session:readConversation', cwd, id),
+    resumeInto: (id: string, claudeSessionId: string): void =>
+      ipcRenderer.send('session:resumeInto', id, claudeSessionId),
+    clear: (id: string): void =>
+      ipcRenderer.send('session:clear', id),
+    // App-control: publish the active pane (for path-less tools) + answer a
+    // renderer-side tool request (open a file/pane) the main process forwarded.
+    publishActivePane: (sessionId: string, info: { path: string; isNotebook: boolean } | null): void =>
+      ipcRenderer.send('session:activePane', sessionId, info),
+    appControlRespond: (reqId: number, result: { text?: string; error?: string }): void =>
+      ipcRenderer.send('appcontrol:response', reqId, result),
     loadSaved: (): Promise<SavedSession[]> =>
       ipcRenderer.invoke('session:load-saved'),
     saveState: (saved: SavedSession[]): Promise<void> =>
@@ -71,6 +92,10 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('fs:mkdir', path),
     createFile: (path: string): Promise<WriteResult> =>
       ipcRenderer.invoke('fs:createFile', path),
+    // Watch a file for external changes (the notebook conflict backstop). Ref-
+    // counted in main; pair each watch() with an unwatch() on unmount.
+    watch: (path: string): void => ipcRenderer.send('fs:watch', path),
+    unwatch: (path: string): void => ipcRenderer.send('fs:unwatch', path),
     // Resolve the absolute path of a dropped File (for drag-in from the OS).
     pathForFile: (file: File): string => webUtils.getPathForFile(file),
   },
@@ -123,10 +148,26 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('git:mergeBranch', dir, name),
   },
   on: {
-    output: (cb: (id: string, data: string) => void): (() => void) => {
-      const h = (_: unknown, id: string, data: string) => cb(id, data)
-      ipcRenderer.on('session:output', h)
-      return () => ipcRenderer.removeListener('session:output', h)
+    // Structured stream-json events for the transcript (native chat).
+    event: (cb: (id: string, e: ClaudeEvent) => void): (() => void) => {
+      const h = (_: unknown, id: string, e: ClaudeEvent) => cb(id, e)
+      ipcRenderer.on('session:event', h)
+      return () => ipcRenderer.removeListener('session:event', h)
+    },
+    permission: (cb: (id: string, req: PermissionRequest) => void): (() => void) => {
+      const h = (_: unknown, id: string, req: PermissionRequest) => cb(id, req)
+      ipcRenderer.on('session:permission', h)
+      return () => ipcRenderer.removeListener('session:permission', h)
+    },
+    ready: (cb: (id: string, claudeSessionId: string) => void): (() => void) => {
+      const h = (_: unknown, id: string, claudeSessionId: string) => cb(id, claudeSessionId)
+      ipcRenderer.on('session:ready', h)
+      return () => ipcRenderer.removeListener('session:ready', h)
+    },
+    appControlRequest: (cb: (req: { reqId: number; op: string; sessionId: string; args: Record<string, unknown> }) => void): (() => void) => {
+      const h = (_: unknown, req: { reqId: number; op: string; sessionId: string; args: Record<string, unknown> }) => cb(req)
+      ipcRenderer.on('appcontrol:request', h)
+      return () => ipcRenderer.removeListener('appcontrol:request', h)
     },
     stateChange: (cb: (id: string, state: string) => void): (() => void) => {
       const h = (_: unknown, id: string, state: string) => cb(id, state)
@@ -152,6 +193,12 @@ contextBridge.exposeInMainWorld('api', {
       const h = () => cb()
       ipcRenderer.on('app:request-save', h)
       return () => ipcRenderer.removeListener('app:request-save', h)
+    },
+    // A watched file changed on disk (see fs.watch). Carries the watched path.
+    fileChanged: (cb: (path: string) => void): (() => void) => {
+      const h = (_: unknown, path: string) => cb(path)
+      ipcRenderer.on('fs:changed', h)
+      return () => ipcRenderer.removeListener('fs:changed', h)
     },
   },
 })

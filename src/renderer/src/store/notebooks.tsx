@@ -37,17 +37,20 @@ interface Notebook {
   kernelName: string | null  // kernelspec the running kernel was started from
   kernelCwd: string | null   // override dir for the kernel (custom env); null = notebook's dir
   dirty: boolean
+  baseline: string           // last text we loaded/saved; disk == baseline ⇒ no external change
+  conflict: boolean          // disk changed under us while the pane was dirty
 }
 
 type State = Record<string, Notebook>
 
 type Action =
-  | { type: 'LOAD'; path: string; cells: Cell[]; meta: NotebookMeta }
+  | { type: 'LOAD'; path: string; cells: Cell[]; meta: NotebookMeta; baseline: string }
   | { type: 'SET_STATUS'; path: string; status: KernelStatus }
   | { type: 'SET_KERNEL_NAME'; path: string; name: string }
   | { type: 'SET_KERNELSPEC_META'; path: string; kernelspec: Record<string, unknown> }
   | { type: 'SET_KERNEL_CWD'; path: string; cwd: string | null }
-  | { type: 'MARK_CLEAN'; path: string }
+  | { type: 'MARK_CLEAN'; path: string; baseline: string }
+  | { type: 'SET_CONFLICT'; path: string; conflict: boolean }
   | { type: 'ADD_CELL'; path: string; cell: Cell }
   | { type: 'INSERT_CELL'; path: string; index: number; cell: Cell }
   | { type: 'MOVE_CELL'; path: string; from: number; to: number }
@@ -74,7 +77,7 @@ function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'LOAD': {
       const savedDir = action.meta.metadata?.autovenv_dir
-      return { ...state, [action.path]: { path: action.path, cells: action.cells, meta: action.meta, kernelStatus: nb?.kernelStatus ?? null, kernelName: nb?.kernelName ?? null, kernelCwd: typeof savedDir === 'string' ? savedDir : null, dirty: false } }
+      return { ...state, [action.path]: { path: action.path, cells: action.cells, meta: action.meta, kernelStatus: nb?.kernelStatus ?? null, kernelName: nb?.kernelName ?? null, kernelCwd: typeof savedDir === 'string' ? savedDir : null, dirty: false, baseline: action.baseline, conflict: false } }
     }
     case 'SET_STATUS':
       return nb ? { ...state, [action.path]: { ...nb, kernelStatus: action.status } } : state
@@ -90,7 +93,9 @@ function reducer(state: State, action: Action): State {
       return dirtyPatch({ ...nb, kernelCwd: action.cwd, meta: { ...nb.meta, metadata } })
     }
     case 'MARK_CLEAN':
-      return nb ? { ...state, [action.path]: { ...nb, dirty: false } } : state
+      return nb ? { ...state, [action.path]: { ...nb, dirty: false, baseline: action.baseline, conflict: false } } : state
+    case 'SET_CONFLICT':
+      return nb ? { ...state, [action.path]: { ...nb, conflict: action.conflict } } : state
     case 'ADD_CELL':
       return nb ? dirtyPatch({ ...nb, cells: [...nb.cells, action.cell] }) : state
     case 'INSERT_CELL': {
@@ -221,6 +226,11 @@ interface ContextValue {
   setCellType: (path: string, cellId: string, type: CellType) => void
   removeCell: (path: string, cellId: string) => void
   updateCode: (path: string, cellId: string, code: string) => void
+  applyAppEdit: (path: string, op: string, args: Record<string, unknown>, isOpen: boolean) => Promise<string>
+  createNotebook: (path: string) => Promise<string>
+  checkExternalChange: (path: string) => Promise<void>
+  reloadFromDisk: (path: string) => Promise<void>
+  dismissConflict: (path: string) => void
   executeCell: (path: string, cellId: string) => void
   runAll: (path: string) => Promise<void>
   restartAndRunAll: (path: string) => Promise<void>
@@ -277,10 +287,12 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
 
   const openNotebook = useCallback(async (path: string) => {
     if (!nbRef.current[path]) {
-      // First open: load cells from disk.
+      // First open: load cells from disk. Baseline = the raw text, so the watcher
+      // can tell our own writes from a genuine external change.
       const res = await window.api.fs.readText(path)
-      const { cells, meta } = res.ok ? parseNotebook(res.text) : parseNotebook('')
-      dispatch({ type: 'LOAD', path, cells, meta })
+      const text = res.ok ? res.text : ''
+      const { cells, meta } = parseNotebook(text)
+      dispatch({ type: 'LOAD', path, cells, meta, baseline: text })
     }
     await ensureKernel(path)
   }, [ensureKernel])
@@ -334,8 +346,38 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
     if (!nb) return
     const text = serializeNotebook(nb.cells, nb.meta)
     const res = await window.api.fs.writeFile(path, text)
-    if (res.ok) dispatch({ type: 'MARK_CLEAN', path })
+    // Baseline = exactly what we wrote, so the watcher event our own write triggers
+    // is recognized as an echo (disk == baseline) and ignored.
+    if (res.ok) dispatch({ type: 'MARK_CLEAN', path, baseline: text })
     return res
+  }, [])
+
+  // The watched notebook file changed on disk (external writer: Bash, git, a
+  // sibling agent). Echo-filter our own writes by comparing to the baseline; then
+  // a clean pane adopts disk, a dirty pane raises a conflict (banner in the view).
+  const checkExternalChange = useCallback(async (path: string) => {
+    const nb = nbRef.current[path]
+    if (!nb) return
+    const res = await window.api.fs.readText(path)
+    if (!res.ok || res.text === nb.baseline) return  // unreadable, or our own write / no real change
+    if (nb.dirty) {
+      dispatch({ type: 'SET_CONFLICT', path, conflict: true })
+    } else {
+      const { cells, meta } = parseNotebook(res.text)
+      dispatch({ type: 'LOAD', path, cells, meta, baseline: res.text })  // adopt disk live
+    }
+  }, [])
+
+  // Conflict resolution: take the on-disk version (discard in-memory edits)…
+  const reloadFromDisk = useCallback(async (path: string) => {
+    const res = await window.api.fs.readText(path)
+    const text = res.ok ? res.text : ''
+    const { cells, meta } = parseNotebook(text)
+    dispatch({ type: 'LOAD', path, cells, meta, baseline: text })
+  }, [])
+  // …or keep mine (dismiss the banner; the next save overwrites disk).
+  const dismissConflict = useCallback((path: string) => {
+    dispatch({ type: 'SET_CONFLICT', path, conflict: false })
   }, [])
 
   const addCell = useCallback((path: string, type: CellType = 'code') => {
@@ -362,6 +404,141 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
 
   const updateCode = useCallback((path: string, cellId: string, code: string) => {
     dispatch({ type: 'UPDATE_CODE', path, cellId, code })
+  }, [])
+
+  // Apply an app-control (MCP tool) edit to a notebook, addressed by 0-based cell
+  // index (Claude doesn't know cell ids). `isOpen` (whether the path is currently
+  // an open tab in some pane — decided by the caller against the file-browser
+  // store, NOT the notebooks cache, which lingers after a tab is closed) picks:
+  //  - open     → mutate in memory, mark dirty (yellow ● + Save); NO disk write,
+  //    so we never clobber a notebook the user is editing, and the edit shows live
+  //    in its pane. The user (or autosave) persists it.
+  //  - not open → a "quiet" disk write: read the file, apply the edit by index,
+  //    serialize, write. We do NOT open a pane; there's nothing on screen to be
+  //    live, so disk is the only sensible target (and nothing to clobber).
+  // Returns 'ok…' or 'error: …'.
+  const applyAppEdit = useCallback(async (path: string, op: string, args: Record<string, unknown>, isOpen: boolean): Promise<string> => {
+    const asType = (v: unknown): CellType => (v === 'markdown' ? 'markdown' : v === 'raw' ? 'raw' : 'code')
+    const num = (v: unknown) => (typeof v === 'number' ? v : Number(v))
+
+    if (isOpen) {
+      // --- Open in a pane: mutate in memory (live, unsaved). Ensure it's loaded
+      // (an open tab normally is; seed from disk otherwise), resolving index→id
+      // from `current` because nbRef won't reflect the LOAD synchronously.
+      // Sequential dispatches compose — useReducer applies each against the prior.
+      let current = nbRef.current[path]?.cells
+      if (!current) {
+        const res = await window.api.fs.readText(path)
+        const text = res.ok ? res.text : ''
+        const parsed = parseNotebook(text)
+        dispatch({ type: 'LOAD', path, cells: parsed.cells, meta: parsed.meta, baseline: text })
+        current = parsed.cells
+      }
+      const N = current.length
+      const inRange = (i: number) => i >= 0 && i < N
+      switch (op) {
+        case 'edit_cell': {
+          const i = num(args.index)
+          if (!inRange(i)) return `error: cell index ${i} out of range (0..${N - 1})`
+          const cellId = current[i].id
+          dispatch({ type: 'UPDATE_CODE', path, cellId, code: String(args.source ?? '') })
+          dispatch({ type: 'CLEAR_OUTPUTS', path, cellId })  // source changed → outputs stale
+          return `ok (edited cell ${i}; ${N} cells, unsaved in the open pane)`
+        }
+        case 'add_cell': {
+          const c = newCell(asType(args.type)); c.code = String(args.source ?? '')
+          dispatch({ type: 'ADD_CELL', path, cell: c })
+          return `ok (${N + 1} cells, unsaved in the open pane)`
+        }
+        case 'insert_cell': {
+          const i = Math.max(0, Math.min(num(args.index), N))
+          const c = newCell(asType(args.type)); c.code = String(args.source ?? '')
+          dispatch({ type: 'INSERT_CELL', path, index: i, cell: c })
+          return `ok (${N + 1} cells, unsaved in the open pane)`
+        }
+        case 'delete_cell': {
+          const i = num(args.index)
+          if (!inRange(i)) return `error: cell index ${i} out of range (0..${N - 1})`
+          dispatch({ type: 'REMOVE_CELL', path, cellId: current[i].id })
+          return `ok (${N - 1} cells, unsaved in the open pane)`
+        }
+        case 'move_cell': {
+          const from = num(args.from), to = num(args.to)
+          if (!inRange(from) || !inRange(to)) return `error: cell index out of range (0..${N - 1})`
+          dispatch({ type: 'MOVE_CELL', path, from, to })
+          return `ok (moved cell ${from} → ${to}; unsaved in the open pane)`
+        }
+        case 'set_cell_type': {
+          const i = num(args.index)
+          if (!inRange(i)) return `error: cell index ${i} out of range (0..${N - 1})`
+          dispatch({ type: 'SET_CELL_TYPE', path, cellId: current[i].id, cellType: asType(args.type) })
+          return `ok (cell ${i} → ${asType(args.type)}; unsaved in the open pane)`
+        }
+        default:
+          return `error: unknown notebook op ${op}`
+      }
+    }
+
+    // --- Quiet disk write (notebook not open): read → apply by index → write.
+    const res = await window.api.fs.readText(path)
+    if (!res.ok) return `error: could not read ${path}: ${res.error} (use create_notebook to make a new one)`
+    const parsed = parseNotebook(res.text)
+    const cells = [...parsed.cells]
+    const N = cells.length
+    const inRange = (i: number) => i >= 0 && i < N
+    switch (op) {
+      case 'edit_cell': {
+        const i = num(args.index)
+        if (!inRange(i)) return `error: cell index ${i} out of range (0..${N - 1})`
+        cells[i] = { ...cells[i], code: String(args.source ?? ''), outputs: [], executionCount: null }
+        break
+      }
+      case 'add_cell': {
+        const c = newCell(asType(args.type)); c.code = String(args.source ?? '')
+        cells.push(c)
+        break
+      }
+      case 'insert_cell': {
+        const i = Math.max(0, Math.min(num(args.index), N))
+        const c = newCell(asType(args.type)); c.code = String(args.source ?? '')
+        cells.splice(i, 0, c)
+        break
+      }
+      case 'delete_cell': {
+        const i = num(args.index)
+        if (!inRange(i)) return `error: cell index ${i} out of range (0..${N - 1})`
+        cells.splice(i, 1)
+        break
+      }
+      case 'move_cell': {
+        const from = num(args.from), to = num(args.to)
+        if (!inRange(from) || !inRange(to)) return `error: cell index out of range (0..${N - 1})`
+        const [moved] = cells.splice(from, 1)
+        cells.splice(to, 0, moved)
+        break
+      }
+      case 'set_cell_type': {
+        const i = num(args.index)
+        if (!inRange(i)) return `error: cell index ${i} out of range (0..${N - 1})`
+        cells[i] = { ...cells[i], type: asType(args.type), outputs: [], executionCount: null }
+        break
+      }
+      default:
+        return `error: unknown notebook op ${op}`
+    }
+    const wr = await window.api.fs.writeFile(path, serializeNotebook(cells, parsed.meta))
+    if (!wr.ok) return `error: ${wr.error}`
+    return `ok (${cells.length} cells, written to disk: ${path} — not open, so no pane to update)`
+  }, [])
+
+  // Create a new, empty notebook on disk (quietly — not opened in a pane). Fails
+  // if the file already exists so we never clobber. The not-open edit path above
+  // then targets it by disk write; opening it later loads it fresh.
+  const createNotebook = useCallback(async (path: string): Promise<string> => {
+    const empty = parseNotebook('')  // baseline nbformat + metadata, zero cells
+    const wr = await window.api.fs.writeFile(path, serializeNotebook(empty.cells, empty.meta))
+    if (!wr.ok) return `error: ${wr.error}`
+    return `ok (created empty notebook: ${path})`
   }, [])
 
   // Run one code cell, resolving when the kernel replies. `false` means the cell
@@ -481,7 +658,8 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
     <NotebookContext.Provider value={{
       notebooks, specs,
       openNotebook, saveNotebook, setKernel, setKernelDir,
-      addCell, insertCell, moveCell, setCellType, removeCell, updateCode,
+      addCell, insertCell, moveCell, setCellType, removeCell, updateCode, applyAppEdit, createNotebook,
+      checkExternalChange, reloadFromDisk, dismissConflict,
       executeCell, runAll, restartAndRunAll, clearOutputs, clearAllOutputs,
       interruptKernel, restartKernel, shutdownKernel, installAndRetry,
       renamePath,

@@ -11,12 +11,17 @@ interface Props {
   readOnly: boolean
   onChange: (text: string) => void
   onSave: () => void
+  // Bump `externalDocVersion` to force the editor's content to `externalDoc`
+  // (e.g. a live reload after an app-control edit changed the file on disk).
+  externalDoc?: string
+  externalDocVersion?: number
 }
 
 // A CodeMirror editor for file previews: syntax-highlighted by filename,
 // editable (unless readOnly), with Cmd/Ctrl-S wired to onSave.
-export function CodeEditor({ initialDoc, filename, readOnly, onChange, onSave }: Props) {
+export function CodeEditor({ initialDoc, filename, readOnly, onChange, onSave, externalDoc, externalDocVersion }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
+  const viewRef = useRef<EditorView | null>(null)
   // Keep callbacks in a ref so the editor is built once, not on every render.
   const cbRef = useRef({ onChange, onSave })
   cbRef.current = { onChange, onSave }
@@ -51,10 +56,20 @@ export function CodeEditor({ initialDoc, filename, readOnly, onChange, onSave }:
       }),
       parent: hostRef.current,
     })
+    viewRef.current = view
     view.focus()
-    return () => view.destroy()
+    return () => { view.destroy(); viewRef.current = null }
     // Build once per mounted file; initialDoc/filename are stable for a preview.
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Replace the whole document when the caller signals an external update. Guarded
+  // on version (not value) so it only fires on an explicit reload, never on typing.
+  useEffect(() => {
+    const view = viewRef.current
+    if (!view || externalDoc == null) return
+    if (view.state.doc.toString() === externalDoc) return
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: externalDoc } })
+  }, [externalDocVersion]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return <div ref={hostRef} className="h-full overflow-auto" />
 }

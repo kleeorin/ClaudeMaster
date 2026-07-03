@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { FilePreview as Preview } from '../../../shared/types'
 import { CodeEditor } from './CodeEditor'
+import { onFileTouched } from '../lib/fileEvents'
 
 interface Props {
   path: string
@@ -36,6 +37,11 @@ export function FileView({ path, onDirtyChange }: Props) {
   const [savedContent, setSavedContent] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Set when the file changed on disk (e.g. an app-control edit) while this view
+  // had unsaved edits — a genuine conflict the user must resolve.
+  const [conflict, setConflict] = useState(false)
+  // Bumped on a live reload to push the fresh text into the (uncontrolled) editor.
+  const [reload, setReload] = useState(0)
   const dirty = editable && content !== savedContent
 
   // Keep the tab's dirty indicator / close-confirm in sync.
@@ -61,9 +67,30 @@ export function FileView({ path, onDirtyChange }: Props) {
     setError(null)
     const res = await window.api.fs.writeFile(path, content)
     setSaving(false)
-    if (res.ok) setSavedContent(content)
+    if (res.ok) { setSavedContent(content); setConflict(false) }
     else setError(res.error)
   }
+
+  // Reload text from disk into the editor (discarding any in-editor edits). Used
+  // to accept an external change (app-control edit) after a live update/conflict.
+  const reloadFromDisk = async () => {
+    const res = await window.api.fs.readText(path)
+    if (!res.ok) { setError(res.error); return }
+    setContent(res.text); setSavedContent(res.text); setConflict(false); setReload((v) => v + 1)
+  }
+
+  // React to an external write to this file (app-control edit_active_file). If the
+  // editor has no unsaved edits, silently reload so the pane stays live; if it
+  // does, don't clobber the user — raise a conflict banner to let them choose.
+  useEffect(() => {
+    return onFileTouched(path, () => {
+      if (!editable) return
+      // `dirty`/`content` are captured per-render; onFileTouched re-subscribes each
+      // render (deps below), so this closure always sees the current values.
+      if (content !== savedContent) setConflict(true)
+      else void reloadFromDisk()
+    })
+  }, [path, editable, content, savedContent])
 
   // Ctrl/Cmd+S saves. Re-bound each render so it sees current `dirty`/`content`.
   useEffect(() => {
@@ -110,6 +137,15 @@ export function FileView({ path, onDirtyChange }: Props) {
         )}
       </div>
 
+      {/* Conflict banner: the file changed on disk while you had unsaved edits. */}
+      {conflict && (
+        <div className="shrink-0 flex items-center gap-3 px-3 py-1.5 bg-ctp-yellow/15 border-b border-ctp-yellow/40 text-[11px] text-ctp-text">
+          <span className="flex-1">This file was changed on disk (e.g. by Claude) while you had unsaved edits.</span>
+          <button onClick={reloadFromDisk} className="px-2 py-0.5 rounded bg-ctp-surface0 hover:bg-ctp-surface1">Reload from disk</button>
+          <button onClick={() => setConflict(false)} className="px-2 py-0.5 rounded bg-ctp-surface0 hover:bg-ctp-surface1">Keep mine</button>
+        </div>
+      )}
+
       {/* Body */}
       <div className="flex-1 overflow-auto min-h-0">
         {preview.kind === 'image' && (
@@ -137,6 +173,8 @@ export function FileView({ path, onDirtyChange }: Props) {
             readOnly={!editable}
             onChange={setContent}
             onSave={save}
+            externalDoc={content}
+            externalDocVersion={reload}
           />
         )}
 

@@ -20,9 +20,11 @@ function controlArgs(): string[] {
 // BatchMode makes a call fail fast instead of blocking on a password/host-key
 // prompt — right for fs/git/test. The interactive pty path passes batch=false so
 // key/agent auth (and a first-time host-key prompt) can still happen in the term.
-export function sshBaseArgs(remote: RemoteConfig, batch = true): string[] {
+export function sshBaseArgs(remote: RemoteConfig, batch = true, opts: { noControl?: boolean } = {}): string[] {
   return [
-    ...controlArgs(),
+    // `noControl` opts out of connection multiplexing for this invocation — needed
+    // when the connection carries a reverse tunnel (see interactiveArgs).
+    ...(opts.noControl ? [] : controlArgs()),
     ...(batch ? ['-o', 'BatchMode=yes'] : []),
     ...(remote.sshOptions ?? []),
     remote.host,
@@ -101,8 +103,22 @@ export function runBuffer(
   })
 }
 
-// Full ssh argv for an interactive pty: force a tty (-tt) and run one remote
-// command string. Used by SessionManager/PaneManager via node-pty.
-export function interactiveArgs(remote: RemoteConfig, remoteCmd: string): string[] {
+// Full ssh argv for an interactive session: force a tty (-tt) and run one remote
+// command string. Used by SessionManager (stream-json) and PaneManager.
+//
+// `reverseTunnel` (a port) adds `-R port:127.0.0.1:port` so remote `claude` can
+// reach the LOCAL app-control MCP server (remote localhost:port → local port).
+// The tunnel must ride its OWN ssh connection: a -R on a multiplexed ControlMaster
+// *secondary* session is silently ignored, so we skip control multiplexing when
+// tunnelling. The long-lived claude connection gains little from multiplexing
+// anyway (it's the frequent short fs/git calls that benefit).
+export function interactiveArgs(remote: RemoteConfig, remoteCmd: string, reverseTunnel?: number): string[] {
+  if (reverseTunnel) {
+    // sshBaseArgs(noControl) ends with the host; insert -R before it.
+    const optsThenHost = sshBaseArgs(remote, false, { noControl: true })
+    const host = optsThenHost[optsThenHost.length - 1]
+    const opts = optsThenHost.slice(0, -1)
+    return [...opts, '-R', `${reverseTunnel}:127.0.0.1:${reverseTunnel}`, host, '-tt', remoteCmd]
+  }
   return [...sshBaseArgs(remote, false), '-tt', remoteCmd]
 }

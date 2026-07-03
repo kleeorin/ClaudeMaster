@@ -1,15 +1,23 @@
-import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest } from '../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta } from '../../shared/types'
 
 declare global {
   interface Window {
     api: {
       session: {
-        create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean) => Promise<string>
+        create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string) => Promise<string>
         destroy: (id: string) => Promise<void>
         relaunch: (id: string) => Promise<boolean>
         list: () => Promise<SessionInfo[]>
-        sendInput: (id: string, data: string) => void
-        resize: (id: string, cols: number, rows: number) => void
+        sendTurn: (id: string, text: string) => void
+        interrupt: (id: string) => void
+        respondPermission: (id: string, requestId: string, decision: PermissionDecision) => void
+        claudeId: (id: string) => Promise<string | undefined>
+        listConversations: (cwd: string) => Promise<ConversationMeta[]>
+        readConversation: (cwd: string, id: string) => Promise<ClaudeEvent[]>
+        resumeInto: (id: string, claudeSessionId: string) => void
+        clear: (id: string) => void
+        publishActivePane: (sessionId: string, info: { path: string; isNotebook: boolean } | null) => void
+        appControlRespond: (reqId: number, result: { text?: string; error?: string }) => void
         loadSaved: () => Promise<SavedSession[]>
         saveState: (sessions: SavedSession[]) => Promise<void>
         autosave: (sessions: SavedSession[]) => Promise<void>
@@ -42,6 +50,8 @@ declare global {
         rename: (path: string, newName: string) => Promise<WriteResult>
         mkdir: (path: string) => Promise<WriteResult>
         createFile: (path: string) => Promise<WriteResult>
+        watch: (path: string) => void
+        unwatch: (path: string) => void
         pathForFile: (file: File) => string
       }
       shell: {
@@ -72,12 +82,16 @@ declare global {
         mergeBranch: (dir: string, name: string) => Promise<GitResult>
       }
       on: {
-        output: (cb: (id: string, data: string) => void) => () => void
+        event: (cb: (id: string, e: ClaudeEvent) => void) => () => void
+        permission: (cb: (id: string, req: PermissionRequest) => void) => () => void
+        ready: (cb: (id: string, claudeSessionId: string) => void) => () => void
+        appControlRequest: (cb: (req: { reqId: number; op: string; sessionId: string; args: Record<string, unknown> }) => void) => () => void
         stateChange: (cb: (id: string, state: string) => void) => () => void
         exit: (cb: (id: string, failedFast: boolean, error: string) => void) => () => void
         paneOutput: (cb: (id: string, data: string) => void) => () => void
         paneExit: (cb: (id: string) => void) => () => void
         requestSave: (cb: () => void) => () => void
+        fileChanged: (cb: (path: string) => void) => () => void
       }
     }
   }

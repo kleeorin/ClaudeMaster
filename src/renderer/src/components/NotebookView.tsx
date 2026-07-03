@@ -22,6 +22,7 @@ export function NotebookView({ path, onDirtyChange }: Props) {
     saveNotebook, setKernel, setKernelDir,
     runAll, restartAndRunAll, clearAllOutputs,
     interruptKernel, restartKernel, installAndRetry,
+    checkExternalChange, reloadFromDisk, dismissConflict,
   } = useNotebooks()
   const [saveError, setSaveError] = useState<string | null>(null)
   // Command-mode selection (Jupyter-style): set on click / Esc out of the editor.
@@ -72,6 +73,16 @@ export function NotebookView({ path, onDirtyChange }: Props) {
   }, [nb?.dirty, onDirtyChange])
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
 
+  // Watch the file for EXTERNAL writes (Bash, git, a sibling agent) — the
+  // conflict backstop. Our own MCP edits are in-memory (no disk write) and our
+  // own saves are echo-filtered in the store, so this only fires on real
+  // outside changes: a clean pane adopts disk, a dirty pane shows the banner.
+  useEffect(() => {
+    window.api.fs.watch(path)
+    const off = window.api.on.fileChanged((p) => { if (p === path) checkExternalChange(path) })
+    return () => { off(); window.api.fs.unwatch(path) }
+  }, [path, checkExternalChange])
+
   const name = path.split('/').pop()
 
   if (!nb) {
@@ -85,7 +96,7 @@ export function NotebookView({ path, onDirtyChange }: Props) {
     )
   }
 
-  const { cells, kernelStatus, kernelName, kernelCwd, dirty } = nb
+  const { cells, kernelStatus, kernelName, kernelCwd, dirty, conflict } = nb
   const isStarting = kernelStatus === 'starting'
   const isDead = kernelStatus === 'dead'
   const hasCells = cells.some((c) => c.type === 'code' && c.code.trim())
@@ -191,6 +202,20 @@ export function NotebookView({ path, onDirtyChange }: Props) {
           Save
         </button>
       </div>
+
+      {/* Conflict banner: the file changed on disk while this pane had unsaved
+          edits. Never clobber silently — let the user choose. */}
+      {conflict && (
+        <div className="shrink-0 flex items-center gap-3 px-3 py-1.5 bg-ctp-yellow/15 border-b border-ctp-yellow/40 text-xs text-ctp-yellow">
+          <span className="flex-1">This notebook changed on disk while you have unsaved edits.</span>
+          <button onClick={() => reloadFromDisk(path)} className="px-1.5 py-0.5 rounded hover:bg-ctp-yellow/20 transition-colors" title="Discard your edits and load the on-disk version">
+            Reload from disk
+          </button>
+          <button onClick={() => dismissConflict(path)} className="px-1.5 py-0.5 rounded hover:bg-ctp-yellow/20 transition-colors" title="Keep your edits; the next save overwrites disk">
+            Keep mine
+          </button>
+        </div>
+      )}
 
       {/* Cells. tabIndex makes the list focusable so command-mode keys (a/b/dd/j/k)
           work after Esc-ing out of an editor. */}

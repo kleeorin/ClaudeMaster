@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import type { SessionInfo, SessionState, SavedSession, RemoteConfig } from '../../../shared/types'
-import { makeRemotePath } from '../../../shared/remotePath'
+import { makeRemotePath, parseTarget } from '../../../shared/remotePath'
 import { playChime } from '../lib/chime'
 import { useNotebooks } from './notebooks'
 
@@ -20,18 +20,22 @@ const isUnder = (path: string, root: string) =>
 // Flatten the live sessions into the persisted shape. Parent links survive as an
 // index into this array (ids are regenerated on restore); a subsession always
 // follows its parent, so the index is always already known on the way back in.
-function serialize(sessions: SessionInfo[], panes: Record<string, string[]>): SavedSession[] {
+// Async because it fetches each session's claude session id (for --resume on
+// restore) from the main process.
+async function serialize(sessions: SessionInfo[], panes: Record<string, string[]>): Promise<SavedSession[]> {
   // Don't persist a failed-to-start session — restoring it would just re-run the
   // same broken command and fail again. parentIndex is resolved against this same
   // filtered list so the saved indices stay consistent on restore.
   const live = sessions.filter((s) => s.state !== 'exited')
-  return live.map((s) => ({
+  const claudeIds = await Promise.all(live.map((s) => window.api.session.claudeId(s.id)))
+  return live.map((s, i) => ({
     name: s.name,
     cwd: s.cwd,
     rootDir: s.rootDir,
     parentIndex: s.parentId ? live.findIndex((p) => p.id === s.parentId) : undefined,
     paneCount: panes[s.id]?.length ?? 0,
     remoteId: s.remoteId,
+    claudeSessionId: claudeIds[i],
   }))
 }
 
@@ -163,6 +167,10 @@ interface ContextValue extends State {
   createRemoteSession: (remote: RemoteConfig, dir: string) => Promise<void>
   relaunchSession: (id: string) => Promise<void>
   addSubsession: (parentId: string, dir?: string) => Promise<void>
+  // App-control (MCP) spawners: no dialog, dir passed explicitly, return the new
+  // id so the caller can orchestrate (seed a prompt via the chat store, …).
+  spawnSubsession: (parentId: string, dir?: string) => Promise<string | undefined>
+  createSessionAt: (dir: string) => Promise<string | undefined>
   closeSession: (id: string) => Promise<void>
   setActive: (id: string) => void
   openPane: (sessionId: string) => Promise<void>
@@ -257,8 +265,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           const s = saved[i]
           const rootDir = s.rootDir ?? s.cwd
           const parentId = s.parentIndex != null ? idByIndex[s.parentIndex] : undefined
-          // Resume the last conversation in this folder via Claude's own renderer.
-          const id = await window.api.session.create(s.name, s.cwd, rootDir, parentId, true)
+          // Restore the session, resuming its claude conversation (--resume
+          // <claudeSessionId>) when we have the id. Without one (older saves) we
+          // start fresh, so a missing id can't fast-fail the launch.
+          const id = await window.api.session.create(
+            s.name, s.cwd, rootDir, parentId, !!s.claudeSessionId, s.claudeSessionId,
+          )
           if (cancelled) return
           idByIndex[i] = id
           // Older saves stored a single `hasPane` flag; newer ones a `paneCount`.
@@ -313,7 +325,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'REMOVE_PANE', paneId })
     })
     const offRequestSave = window.api.on.requestSave(async () => {
-      const saved = serialize(stateRef.current.sessions, stateRef.current.panes)
+      const saved = await serialize(stateRef.current.sessions, stateRef.current.panes)
       await window.api.session.saveState(saved)
     })
 
@@ -367,6 +379,33 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
+  // Spawn a subsession from app-control (no dialog). Defaults to the parent's OWN
+  // folder — the same-folder multi-agent case — so several Claude backends run in
+  // one directory; pass `dir` (a plain path on the parent's host) to scope it to a
+  // subdirectory instead. Optionally seeds an initial prompt. Returns the new id.
+  const spawnSubsession = useCallback(async (parentId: string, dir?: string): Promise<string | undefined> => {
+    const parent = stateRef.current.sessions.find((s) => s.id === parentId)
+    if (!parent) return undefined
+    const picked = dir ?? parseTarget(parent.cwd).path  // plain path; default = same folder
+    const rootDir = parent.remoteId ? makeRemotePath(parent.remoteId, picked) : picked
+    const name = picked.split('/').filter(Boolean).pop() || 'Subsession'
+    const id = await window.api.session.create(name, parent.cwd, rootDir, parentId)
+    dispatch({
+      type: 'ADD',
+      session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, state: 'idle' },
+    })
+    return id
+  }, [])
+
+  // Open a new top-level session in `dir` from app-control (no dialog). Local only
+  // (dir is a plain absolute path); remote creation stays interactive for now.
+  const createSessionAt = useCallback(async (dir: string): Promise<string | undefined> => {
+    const name = dir.split('/').filter(Boolean).pop() || 'Session'
+    const id = await window.api.session.create(name, dir, dir)
+    dispatch({ type: 'ADD', session: { id, name, cwd: dir, rootDir: dir, state: 'idle' } })
+    return id
+  }, [])
+
   const closeSession = useCallback(async (id: string) => {
     // Closing a session also closes any subsessions hanging off it.
     const closing = stateRef.current.sessions.filter((s) => s.id === id || s.parentId === id)
@@ -402,7 +441,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // Auto-save remaining sessions so state survives crashes and hot-reloads
     const closed = new Set(toClose)
     const remaining = stateRef.current.sessions.filter((s) => !closed.has(s.id))
-    await window.api.session.autosave(serialize(remaining, stateRef.current.panes))
+    await window.api.session.autosave(await serialize(remaining, stateRef.current.panes))
   }, [shutdownKernel])
 
   const setActive = useCallback((id: string) => {
@@ -456,7 +495,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   return (
     <SessionContext.Provider value={{
-      ...state, createSession, createRemoteSession, relaunchSession, addSubsession, closeSession, setActive,
+      ...state, createSession, createRemoteSession, relaunchSession, addSubsession, spawnSubsession, createSessionAt, closeSession, setActive,
       openPane, addPane, removePane, closePane, paneIdsFor, visiblePanesFor,
       notifyEnabled, soundEnabled, setNotifyEnabled, setSoundEnabled,
     }}>

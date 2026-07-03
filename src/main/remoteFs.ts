@@ -24,8 +24,16 @@ const IMAGE_MIME: Record<string, string> = {
 }
 const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2 MB cap for text previews (matches local)
 
-async function exists(remote: RemoteConfig, path: string): Promise<boolean> {
+export async function exists(remote: RemoteConfig, path: string): Promise<boolean> {
   return (await ssh.run(remote, ['test', '-e', path])).code === 0
+}
+
+// Modification time in epoch ms, or 0 if the file is missing/unreadable. Used by
+// the notebook watcher to poll a remote file for external changes.
+export async function mtimeMs(remote: RemoteConfig, path: string): Promise<number> {
+  const { stdout, code } = await ssh.run(remote, ['stat', '-c', '%Y', '--', path])
+  if (code !== 0) return 0
+  return (Number(stdout.trim()) || 0) * 1000
 }
 
 // Remote twin of index.ts' uniqueDest: pick a non-colliding name in destDir,

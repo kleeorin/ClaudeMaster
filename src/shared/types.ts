@@ -22,6 +22,43 @@ export interface SavedSession {
   paneCount?: number     // number of stacked terminal panes to restore
   hasPane?: boolean      // legacy: single pane (older saves); read as paneCount 1
   remoteId?: string      // remote host this session runs on (local when absent)
+  claudeSessionId?: string // claude's own --session-id, for --resume on restore
+}
+
+// --- Native chat backend (stream-json) ---------------------------------------
+// See PROTOCOL-stream-json.md for the pinned wire contract (CLI 2.1.198).
+
+// A parsed stream-json event, forwarded to the renderer to build the transcript.
+// We keep it loose (the raw object) plus a couple of synthetic kinds; the store
+// discriminates on `type`. Notable types: system/init, system/thinking_tokens,
+// rate_limit_event, stream_event, assistant, user, result, and 'stderr' (ours).
+export type ClaudeEvent = { type: string; [k: string]: unknown }
+
+// A can_use_tool prompt surfaced to the renderer for a native permission UI.
+export interface PermissionRequest {
+  requestId: string
+  toolName: string
+  displayName: string
+  input: Record<string, unknown>
+  toolUseId: string
+  description?: string
+  suggestions: unknown[]   // permission_suggestions: setMode / addRules options
+}
+
+export type PermissionDecision =
+  // updatedPermissions echoes the request's permission_suggestions (setMode /
+  // addRules) to implement "allow always"; the CLI applies + persists them per
+  // each suggestion's `destination` (session vs local/user/project settings).
+  | { behavior: 'allow'; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] }
+  | { behavior: 'deny'; message?: string }
+
+// A resumable past conversation, for the native /resume picker (see conversations.ts).
+export interface ConversationMeta {
+  id: string          // claude session id (= transcript filename)
+  mtimeMs: number     // last-modified, for ordering + "N ago" display
+  title: string       // ai-generated title, else first user prompt
+  lastPrompt: string  // subtitle preview
+  turns: number       // user-turn count
 }
 
 // --- Remotes -----------------------------------------------------------------

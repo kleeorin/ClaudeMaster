@@ -3,7 +3,7 @@ import { useSessions } from './store/sessions'
 import { useFileBrowser, CLAUDE_TAB } from './store/fileBrowser'
 import { Sidebar } from './components/Sidebar'
 import { Toolbar } from './components/Toolbar'
-import { TerminalView } from './components/TerminalView'
+import { ChatView } from './components/ChatView'
 import { PaneView } from './components/PaneView'
 import { TabBar } from './components/TabBar'
 import { ContextMenu } from './components/ContextMenu'
@@ -154,7 +154,7 @@ export function App() {
                               </button>
                             </div>
                           )}
-                          <TerminalView sessionId={s.id} isActive={visible} />
+                          <ChatView sessionId={s.id} isActive={visible} />
                         </div>
                       )
                     })}

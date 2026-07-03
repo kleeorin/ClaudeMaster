@@ -114,6 +114,18 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
     return () => { cancelled = true }
   }, [path])
 
+  // Re-read the listing when the viewed directory changes on disk — files created
+  // by Claude (MCP tools / Bash), by another session, or any external process show
+  // up without a manual refresh. fs.watch fires on create/delete/rename in the dir;
+  // the remote arm polls the dir's mtime (bumped on add/remove). Debounced in main.
+  useEffect(() => {
+    window.api.fs.watch(path)
+    const off = window.api.on.fileChanged((changed) => {
+      if (changed === path) window.api.fs.readDir(path).then(setEntries)
+    })
+    return () => { off(); window.api.fs.unwatch(path) }
+  }, [path])
+
   // Dismiss the context menu on any outside interaction.
   useEffect(() => {
     if (!menu) return
