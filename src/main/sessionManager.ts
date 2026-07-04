@@ -7,6 +7,7 @@ import type {
 import { parseTarget } from './remotePath'
 import * as ssh from './ssh'
 import { ClaudeEngine, claudeArgs } from './claudeEngine'
+import { getAgent, SUBSESSION_REPORT_INSTRUCTION } from './agents'
 
 interface Session extends SessionInfo {
   engine: ClaudeEngine | null   // null once the Claude process has exited (relaunchable)
@@ -54,10 +55,40 @@ export interface SessionManagerOpts {
   reverseTunnelPort?: () => number | undefined
 }
 
-export class SessionManager extends EventEmitter {
+// The surface index.ts drives, satisfied by BOTH backends: the native stream-json
+// SessionManager and the pty-based PtySessionManager (TUI mode). Each backend
+// implements its own I/O (native = turn/permission methods; tui = pty
+// sendInput/resize) and stubs the other side's methods, so index.ts can register
+// one set of IPC handlers regardless of the chosen frontend.
+export interface SessionBackend extends EventEmitter {
+  create(
+    name: string, cwd: string, rootDir?: string, parentId?: string,
+    resume?: boolean, remote?: RemoteConfig, claudeSessionId?: string, agentId?: string, model?: string,
+  ): string
+  relaunch(id: string): boolean
+  destroy(id: string): void
+  list(): SessionInfo[]
+  claudeSessionId(id: string): string | undefined
+  // native (stream-json) turn I/O
+  sendUserTurn(id: string, text: string): void
+  interrupt(id: string): void
+  respondPermission(id: string, requestId: string, decision: PermissionDecision): void
+  resumeInto(id: string, claudeSessionId: string): void
+  restartFresh(id: string): void
+  // tui (pty) I/O
+  sendInput(id: string, data: string): void
+  resize(id: string, cols: number, rows: number): void
+}
+
+export class SessionManager extends EventEmitter implements SessionBackend {
   private sessions = new Map<string, Session>()
 
   constructor(private readonly opts: SessionManagerOpts = {}) { super() }
+
+  // pty I/O is a no-op in native mode (the renderer renders ChatView, not a
+  // terminal); present so both backends satisfy SessionBackend.
+  sendInput(_id: string, _data: string): void { /* native mode has no pty */ }
+  resize(_id: string, _cols: number, _rows: number): void { /* native mode has no pty */ }
 
   create(
     name: string,
@@ -67,10 +98,12 @@ export class SessionManager extends EventEmitter {
     resume = false,
     remote?: RemoteConfig,
     claudeSessionId?: string,
+    agentId?: string,
+    model?: string,
   ): string {
     const id = crypto.randomUUID()
     const session: Session = {
-      id, name, cwd, rootDir, parentId, remoteId: remote?.id,
+      id, name, cwd, rootDir, parentId, remoteId: remote?.id, agentId, model,
       state: 'idle', engine: null, startedAt: 0, remote, resume,
       claudeSessionId: claudeSessionId ?? crypto.randomUUID(),
       stderrTail: '',
@@ -85,7 +118,23 @@ export class SessionManager extends EventEmitter {
   // independent of the engine, so a session stays usable even if Claude fails.
   private launch(session: Session): void {
     const { id, cwd, remote, resume, claudeSessionId } = session
-    const args = claudeArgs({ sessionId: claudeSessionId, resume, mcpConfig: this.opts.mcpConfig?.(id, remote) })
+    // The session runs as its agent (role): charter + tool scope + model. `general`
+    // (the default) contributes nothing, so a plain session is unchanged.
+    const agent = getAgent(session.agentId)
+    // Per-session model override wins over the role's default model. Every
+    // subsession (has a parentId) also gets the "report back when done" instruction
+    // appended, so the orchestration loop closes even if the role charter doesn't
+    // mention it — otherwise a child just writes into its own transcript and the
+    // parent, which it can't see, is never woken.
+    const systemPrompt = [agent.systemPrompt, session.parentId ? SUBSESSION_REPORT_INSTRUCTION : undefined]
+      .filter(Boolean).join('\n\n') || undefined
+    const args = claudeArgs({
+      sessionId: claudeSessionId, resume, mcpConfig: this.opts.mcpConfig?.(id, remote),
+      model: session.model ?? agent.model,
+      appendSystemPrompt: systemPrompt,
+      allowedTools: agent.allowedTools,
+      disallowedTools: agent.disallowedTools,
+    })
 
     // Remote gets the app-control MCP server reverse-tunnelled in (same port on
     // both ends) so remote claude can call it at 127.0.0.1:<port>.
@@ -252,8 +301,8 @@ export class SessionManager extends EventEmitter {
   }
 
   list(): SessionInfo[] {
-    return Array.from(this.sessions.values()).map(({ id, name, cwd, rootDir, parentId, remoteId, state }) => ({
-      id, name, cwd, rootDir, parentId, remoteId, state,
+    return Array.from(this.sessions.values()).map(({ id, name, cwd, rootDir, parentId, remoteId, agentId, model, state }) => ({
+      id, name, cwd, rootDir, parentId, remoteId, agentId, model, state,
     }))
   }
 

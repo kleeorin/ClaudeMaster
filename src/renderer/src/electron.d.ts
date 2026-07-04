@@ -3,13 +3,28 @@ import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, Wr
 declare global {
   interface Window {
     api: {
+      // The whole-app frontend, chosen at startup (restart to change).
+      frontend: 'native' | 'tui'
+      agents: {
+        list: () => Promise<Array<{ id: string; name: string; description: string }>>
+      }
+      models: {
+        list: () => Promise<Array<{ id: string; name: string }>>
+      }
+      settings: {
+        getFrontend: () => Promise<'native' | 'tui'>
+        setFrontend: (f: 'native' | 'tui') => Promise<void>
+      }
       session: {
-        create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string) => Promise<string>
+        create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string) => Promise<string>
         destroy: (id: string) => Promise<void>
         relaunch: (id: string) => Promise<boolean>
         list: () => Promise<SessionInfo[]>
         sendTurn: (id: string, text: string) => void
         interrupt: (id: string) => void
+        // TUI mode: raw pty keystroke input + terminal resize.
+        sendInput: (id: string, data: string) => void
+        resize: (id: string, cols: number, rows: number) => void
         respondPermission: (id: string, requestId: string, decision: PermissionDecision) => void
         claudeId: (id: string) => Promise<string | undefined>
         listConversations: (cwd: string) => Promise<ConversationMeta[]>
@@ -38,6 +53,7 @@ declare global {
       }
       dialog: {
         openDir: (defaultPath?: string) => Promise<string | null>
+        saveFile: (defaultName?: string) => Promise<string | null>
       }
       fs: {
         readDir: (path: string) => Promise<DirEntry[]>
@@ -71,6 +87,7 @@ declare global {
         stage: (dir: string, file: string) => Promise<GitResult>
         unstage: (dir: string, file: string) => Promise<GitResult>
         stageAll: (dir: string) => Promise<GitResult>
+        stageTracked: (dir: string) => Promise<GitResult>
         unstageAll: (dir: string) => Promise<GitResult>
         commit: (dir: string, message: string) => Promise<GitResult>
         log: (dir: string, limit?: number) => Promise<GitLog>
@@ -88,6 +105,7 @@ declare global {
         appControlRequest: (cb: (req: { reqId: number; op: string; sessionId: string; args: Record<string, unknown> }) => void) => () => void
         stateChange: (cb: (id: string, state: string) => void) => () => void
         exit: (cb: (id: string, failedFast: boolean, error: string) => void) => () => void
+        output: (cb: (id: string, data: string) => void) => () => void
         paneOutput: (cb: (id: string, data: string) => void) => () => void
         paneExit: (cb: (id: string) => void) => () => void
         requestSave: (cb: () => void) => () => void

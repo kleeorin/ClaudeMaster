@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from '@codemirror/view'
-import { EditorState } from '@codemirror/state'
+import { EditorState, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { editorTheme, editorHighlight } from '../lib/editorTheme'
 import { languageForFilename } from '../lib/codeLanguages'
@@ -15,11 +15,14 @@ interface Props {
   // (e.g. a live reload after an app-control edit changed the file on disk).
   externalDoc?: string
   externalDocVersion?: number
+  // Extra CodeMirror extensions (e.g. diff line colouring). Read once at mount,
+  // so pass a stable value.
+  extensions?: Extension[]
 }
 
 // A CodeMirror editor for file previews: syntax-highlighted by filename,
 // editable (unless readOnly), with Cmd/Ctrl-S wired to onSave.
-export function CodeEditor({ initialDoc, filename, readOnly, onChange, onSave, externalDoc, externalDocVersion }: Props) {
+export function CodeEditor({ initialDoc, filename, readOnly, onChange, onSave, externalDoc, externalDocVersion, extensions }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   // Keep callbacks in a ref so the editor is built once, not on every render.
@@ -38,6 +41,7 @@ export function CodeEditor({ initialDoc, filename, readOnly, onChange, onSave, e
           drawSelection(),
           history(),
           ...(lang ? [lang] : []),
+          ...(extensions ?? []),
           editorTheme,
           editorHighlight,
           EditorView.editable.of(!readOnly),

@@ -136,6 +136,13 @@ export async function stageAll(dir: string): Promise<GitResult> {
   catch (err) { return { ok: false, error: errMsg(err) } }
 }
 
+// Stage modifications and deletions of already-tracked files only (`add -u`),
+// leaving untracked files alone — unlike stageAll (`add -A`).
+export async function stageTracked(dir: string): Promise<GitResult> {
+  try { await git(dir, ['add', '-u']); return { ok: true } }
+  catch (err) { return { ok: false, error: errMsg(err) } }
+}
+
 export async function unstageAll(dir: string): Promise<GitResult> {
   try { await git(dir, ['reset', '-q', 'HEAD']); return { ok: true } }
   catch (err) { return { ok: false, error: errMsg(err) } }

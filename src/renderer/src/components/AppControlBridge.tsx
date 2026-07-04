@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useFileBrowser, CLAUDE_TAB } from '../store/fileBrowser'
 import { useSessions } from '../store/sessions'
 import { useNotebooks } from '../store/notebooks'
@@ -40,6 +40,26 @@ export function AppControlBridge() {
   const createSessionAtRef = useRef(createSessionAt); createSessionAtRef.current = createSessionAt
   const closeSessionRef = useRef(closeSession); closeSessionRef.current = closeSession
   const sendTurnRef = useRef(sendTurn); sendTurnRef.current = sendTurn
+  // Fresh sessions view so the once-subscribed handler + the flusher read current state.
+  const sessionsRef = useRef(sessions); sessionsRef.current = sessions
+
+  // report_to_parent inbox: subsession reports queued per parent id, delivered to
+  // the parent's transcript only when the parent is IDLE (deferred delivery), so a
+  // busy parent is never interrupted. Multiple siblings' reports batch into one
+  // turn — the natural "join" when a parent fans out and then awaits its children.
+  const inboxRef = useRef<Map<string, string[]>>(new Map())
+  const flushReports = useCallback(() => {
+    for (const [parentId, texts] of inboxRef.current) {
+      const parent = sessionsRef.current.find((s) => s.id === parentId)
+      if (!parent || parent.state === 'exited') { inboxRef.current.delete(parentId); continue }
+      if (parent.state !== 'idle' || texts.length === 0) continue
+      // Drain BEFORE sending so the send's own running→idle transition can't re-flush.
+      inboxRef.current.delete(parentId)
+      sendTurnRef.current(parentId, texts.join('\n\n---\n\n'))
+    }
+  }, [])
+  // Flush whenever any session's state changes (a parent going idle drains its inbox).
+  useEffect(() => { flushReports() }, [sessions, flushReports])
   useEffect(() => {
     return window.api.on.appControlRequest(async ({ reqId, op, sessionId, args }) => {
       const respond = (r: { text?: string; error?: string }) => window.api.session.appControlRespond(reqId, r)
@@ -79,16 +99,28 @@ export function AppControlBridge() {
           emitFileTouched(path)
           respond({ text: `Edited ${path}` })
         } else if (op === 'spawnSubsession') {
-          const id = await spawnSubsessionRef.current(sessionId, args.dir as string | undefined)
+          const agent = args.agent as string | undefined
+          const id = await spawnSubsessionRef.current(sessionId, args.dir as string | undefined, agent, args.model as string | undefined)
           if (id && args.prompt) sendTurnRef.current(id, String(args.prompt))
-          respond(id ? { text: `Spawned subsession ${id}${args.prompt ? ' and seeded its first turn' : ''}.` } : { error: 'could not spawn subsession' })
+          respond(id ? { text: `Spawned ${agent ?? 'general'} subsession ${id}${args.prompt ? ' and seeded its first turn' : ''}.` } : { error: 'could not spawn subsession' })
         } else if (op === 'createSession') {
-          const id = await createSessionAtRef.current(String(args.dir))
+          const agent = args.agent as string | undefined
+          const id = await createSessionAtRef.current(String(args.dir), agent, args.model as string | undefined)
           if (id && args.prompt) sendTurnRef.current(id, String(args.prompt))
-          respond(id ? { text: `Opened session ${id} in ${args.dir}.` } : { error: 'could not open session' })
+          respond(id ? { text: `Opened ${agent ?? 'general'} session ${id} in ${args.dir}.` } : { error: 'could not open session' })
         } else if (op === 'runInSession') {
           sendTurnRef.current(String(args.id), String(args.prompt))
           respond({ text: `Sent a turn to session ${args.id}.` })
+        } else if (op === 'reportToParent') {
+          const parentId = String(args.parentId)
+          const queue = inboxRef.current.get(parentId) ?? []
+          queue.push(String(args.text))
+          inboxRef.current.set(parentId, queue)
+          // Deliver now if the parent is already idle; otherwise it flushes when the
+          // parent next goes idle (the [sessions] effect above).
+          const idle = sessionsRef.current.find((s) => s.id === parentId)?.state === 'idle'
+          flushReports()
+          respond({ text: idle ? 'Report delivered to the parent session.' : 'Parent is busy — report queued; it will be delivered when the parent is next idle.' })
         } else if (op === 'closeSession') {
           await closeSessionRef.current(String(args.id))
           respond({ text: `Closed session ${args.id}.` })

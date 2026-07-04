@@ -10,6 +10,8 @@ export interface SessionInfo {
   rootDir: string    // root for the terminal pane + file browser (a subdir for subsessions)
   parentId?: string  // set on subsessions; points at the owning session
   remoteId?: string  // set when the session runs on a remote host (see RemoteConfig)
+  agentId?: string   // the role this session runs as (see main/agents.ts); undefined = 'general'
+  model?: string     // per-session model override; undefined = the role's model, else account default
   state: SessionState
   exitError?: string // last output when state === 'exited' (why it failed to start)
 }
@@ -22,6 +24,8 @@ export interface SavedSession {
   paneCount?: number     // number of stacked terminal panes to restore
   hasPane?: boolean      // legacy: single pane (older saves); read as paneCount 1
   remoteId?: string      // remote host this session runs on (local when absent)
+  agentId?: string       // the role this session runs as (re-applied on restore)
+  model?: string         // per-session model override (re-applied on restore)
   claudeSessionId?: string // claude's own --session-id, for --resume on restore
 }
 

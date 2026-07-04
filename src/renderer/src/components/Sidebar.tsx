@@ -53,6 +53,39 @@ export function Sidebar({ width }: { width?: number }) {
   const [remotes, setRemotes] = useState<RemoteConfig[]>([])
   const [showRemotes, setShowRemotes] = useState(false)
   const [dirPick, setDirPick] = useState<DirPick | null>(null)
+  // Role + model pickers for the New Session / New subsession menus. `*Role`/`*Model`
+  // hold the current choice; the sentinel first option ('general' role, 'default'
+  // model) → undefined, i.e. a plain session on the account default.
+  const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([])
+  const [models, setModels] = useState<Array<{ id: string; name: string }>>([])
+  const [newRole, setNewRole] = useState('general')
+  const [newModel, setNewModel] = useState('default')
+  const [subRole, setSubRole] = useState('general')
+  const [subModel, setSubModel] = useState('default')
+  const roleArg = (r: string) => (r === 'general' ? undefined : r)
+  const modelArg = (m: string) => (m === 'default' ? undefined : m)
+  // Prepend the 'default' (account setting) sentinel to the fetched model list.
+  const modelOptions = [{ id: 'default', name: 'Default' }, ...models]
+  useEffect(() => {
+    void window.api.agents.list().then(setAgents)
+    void window.api.models.list().then(setModels)
+  }, [])
+
+  // Whole-app frontend toggle. `window.api.frontend` is the one currently RUNNING
+  // (chosen at startup); `pendingFrontend` is what the next launch will use. They
+  // diverge once toggled, which raises the restart notice — switching backend + chat
+  // surface mid-run isn't supported, so it applies on relaunch.
+  const runningFrontend = window.api.frontend
+  const [pendingFrontend, setPendingFrontend] = useState<'native' | 'tui'>(runningFrontend)
+  const toggleFrontend = useCallback(() => {
+    setPendingFrontend((cur) => {
+      const next = cur === 'tui' ? 'native' : 'tui'
+      void window.api.settings.setFrontend(next)
+      return next
+    })
+  }, [])
+  const restartNeeded = pendingFrontend !== runningFrontend
+  const frontendLabel = (f: 'native' | 'tui') => (f === 'tui' ? 'Claude Code TUI' : 'Native chat')
   const attentionCount = Object.keys(attention).length
 
   const loadRemotes = useCallback(async () => {
@@ -71,23 +104,23 @@ export function Sidebar({ width }: { width?: number }) {
       // you browse to the project folder (nothing decided a priori).
       initialDir: remote.defaultDir,
       title: 'New session — choose a folder',
-      onChoose: (dir) => { setDirPick(null); void createRemoteSession(remote, dir) },
+      onChoose: (dir) => { setDirPick(null); void createRemoteSession(remote, dir, roleArg(newRole), modelArg(newModel)) },
     })
   }
 
   // "Add Subsession": remote parents need the remote folder picker; local parents
   // use the native dialog inside addSubsession.
-  const startSubsession = (session: SessionInfo) => {
+  const startSubsession = (session: SessionInfo, agentId?: string, model?: string) => {
     const remote = remotes.find((r) => r.id === session.remoteId)
     if (remote) {
       setDirPick({
         remote,
         initialDir: parseTarget(session.rootDir).path,
         title: 'Add subsession — choose a folder',
-        onChoose: (dir) => { setDirPick(null); void addSubsession(session.id, dir) },
+        onChoose: (dir) => { setDirPick(null); void addSubsession(session.id, dir, agentId, model) },
       })
     } else {
-      void addSubsession(session.id)
+      void addSubsession(session.id, undefined, agentId, model)
     }
   }
 
@@ -124,7 +157,7 @@ export function Sidebar({ width }: { width?: number }) {
     ev.stopPropagation()
     // Beat the global (terminal) context menu listening on `document`.
     ev.nativeEvent.stopImmediatePropagation()
-    const MENU_W = 160, MENU_H = 80
+    const MENU_W = 160, MENU_H = 150
     setMenu({
       x: Math.min(ev.clientX, window.innerWidth - MENU_W),
       y: Math.min(ev.clientY, window.innerHeight - MENU_H),
@@ -180,7 +213,27 @@ export function Sidebar({ width }: { width?: number }) {
             <><path d="M11 5 6 9H2v6h4l5 4zM22 9l-6 6M16 9l6 6" /></>
           )}
         </HeaderToggle>
+        {/* Whole-app frontend: native chat (chat bubble) vs Claude Code TUI (terminal).
+            Restart to apply — see the notice below the header. */}
+        <HeaderToggle
+          on={pendingFrontend === 'tui'}
+          onClick={toggleFrontend}
+          title={`Frontend: ${frontendLabel(pendingFrontend)} — click to switch to ${frontendLabel(pendingFrontend === 'tui' ? 'native' : 'tui')} (restart to apply)`}
+        >
+          {pendingFrontend === 'tui' ? (
+            <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3M13 15h4" /></>
+          ) : (
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          )}
+        </HeaderToggle>
       </div>
+
+      {restartNeeded && (
+        <div className="px-3 py-1.5 flex items-start gap-1.5 bg-ctp-yellow/10 border-b border-ctp-yellow/30 text-[11px] text-ctp-yellow">
+          <span className="mt-px">⟳</span>
+          <span className="flex-1">Frontend set to <span className="font-medium">{frontendLabel(pendingFrontend)}</span> — restart ClaudeMaster to apply.</span>
+        </div>
+      )}
 
       <div className="px-2 pt-2 pb-1 flex items-center gap-2">
         <span className="text-[10px] font-semibold text-ctp-overlay uppercase tracking-widest px-1">
@@ -219,6 +272,14 @@ export function Sidebar({ width }: { width?: number }) {
             >
               {s.name}
             </span>
+            {s.agentId && s.agentId !== 'general' && (
+              <span
+                title={`Agent: ${s.agentId}`}
+                className="shrink-0 max-w-16 truncate px-1 rounded bg-ctp-surface1 text-ctp-peach text-[9px] leading-4 font-medium"
+              >
+                {s.agentId}
+              </span>
+            )}
             {s.remoteId && (
               <span
                 title={`Remote: ${remoteLabel(s.remoteId) ?? s.remoteId}`}
@@ -251,8 +312,11 @@ export function Sidebar({ width }: { width?: number }) {
             className="absolute bottom-full left-2 right-2 mb-1 bg-ctp-surface0 border border-ctp-surface1 rounded shadow-lg py-1 select-none z-50"
             onClick={(e) => e.stopPropagation()}
           >
+            <MenuSelect label="Role" value={newRole} onChange={setNewRole} options={agents} />
+            <MenuSelect label="Model" value={newModel} onChange={setNewModel} options={modelOptions} />
+            <div className="mx-2 my-0.5 border-t border-ctp-surface1" />
             <button
-              onClick={() => { setNewMenu(false); void createSession() }}
+              onClick={() => { setNewMenu(false); void createSession(roleArg(newRole), modelArg(newModel)) }}
               className="w-full text-left px-3 py-1.5 text-xs text-ctp-text hover:bg-ctp-surface1 transition-colors"
             >
               Local…
@@ -304,8 +368,11 @@ export function Sidebar({ width }: { width?: number }) {
           className="fixed z-50 w-40 bg-ctp-surface0 border border-ctp-surface1 rounded shadow-lg py-1 select-none"
           onClick={(e) => e.stopPropagation()}
         >
+          <MenuSelect label="Role" value={subRole} onChange={setSubRole} options={agents} />
+          <MenuSelect label="Model" value={subModel} onChange={setSubModel} options={modelOptions} />
+          <div className="mx-2 my-0.5 border-t border-ctp-surface1" />
           <button
-            onClick={() => { const s = menu.session; setMenu(null); startSubsession(s) }}
+            onClick={() => { const s = menu.session; setMenu(null); startSubsession(s, roleArg(subRole), modelArg(subModel)) }}
             className="w-full text-left px-3 py-1.5 text-xs text-ctp-text hover:bg-ctp-surface1 transition-colors"
           >
             Add Subsession
@@ -319,6 +386,30 @@ export function Sidebar({ width }: { width?: number }) {
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+// A labelled <select> row shared by the New Session dropdown and the New subsession
+// menu — used for both the agent Role and the Model. The first option is the
+// sentinel default (general role / account-default model). stopPropagation keeps a
+// click on the select from dismissing the surrounding menu.
+function MenuSelect({ label, value, onChange, options }: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: Array<{ id: string; name: string }>
+}) {
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1.5" onClick={(e) => e.stopPropagation()}>
+      <span className="w-10 shrink-0 text-[10px] uppercase tracking-wide text-ctp-overlay">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="flex-1 min-w-0 bg-ctp-surface1 text-ctp-text text-xs rounded px-1 py-0.5 outline-none cursor-pointer"
+      >
+        {options.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+      </select>
     </div>
   )
 }

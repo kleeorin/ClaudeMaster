@@ -1,10 +1,32 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta } from '../shared/types'
 
+// The whole-app frontend, handed over synchronously by main via additionalArguments
+// so the renderer can pick its chat surface (ChatView vs TerminalView) on first
+// render, with no async round-trip. Defaults to 'native' if the arg is absent.
+const frontendArg = process.argv.find((a) => a.startsWith('--cm-frontend='))?.split('=')[1]
+const frontend: 'native' | 'tui' = frontendArg === 'tui' ? 'tui' : 'native'
+
 contextBridge.exposeInMainWorld('api', {
+  frontend,
+  agents: {
+    list: (): Promise<Array<{ id: string; name: string; description: string }>> =>
+      ipcRenderer.invoke('agents:list'),
+  },
+  models: {
+    list: (): Promise<Array<{ id: string; name: string }>> =>
+      ipcRenderer.invoke('models:list'),
+  },
+  settings: {
+    getFrontend: (): Promise<'native' | 'tui'> =>
+      ipcRenderer.invoke('settings:getFrontend'),
+    // Persist the choice; takes effect on next launch (caller shows a restart notice).
+    setFrontend: (f: 'native' | 'tui'): Promise<void> =>
+      ipcRenderer.invoke('settings:setFrontend', f),
+  },
   session: {
-    create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string): Promise<string> =>
-      ipcRenderer.invoke('session:create', name, cwd, rootDir, parentId, resume, claudeSessionId),
+    create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string): Promise<string> =>
+      ipcRenderer.invoke('session:create', name, cwd, rootDir, parentId, resume, claudeSessionId, agentId, model),
     destroy: (id: string): Promise<void> =>
       ipcRenderer.invoke('session:destroy', id),
     relaunch: (id: string): Promise<boolean> =>
@@ -17,6 +39,11 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.send('session:sendTurn', id, text),
     interrupt: (id: string): void =>
       ipcRenderer.send('session:interrupt', id),
+    // TUI mode: raw keystroke input + terminal resize for the session pty.
+    sendInput: (id: string, data: string): void =>
+      ipcRenderer.send('session:input', id, data),
+    resize: (id: string, cols: number, rows: number): void =>
+      ipcRenderer.send('session:resize', id, cols, rows),
     respondPermission: (id: string, requestId: string, decision: PermissionDecision): void =>
       ipcRenderer.send('session:respondPermission', id, requestId, decision),
     claudeId: (id: string): Promise<string | undefined> =>
@@ -70,6 +97,8 @@ contextBridge.exposeInMainWorld('api', {
   dialog: {
     openDir: (defaultPath?: string): Promise<string | null> =>
       ipcRenderer.invoke('dialog:openDir', defaultPath),
+    saveFile: (defaultName?: string): Promise<string | null> =>
+      ipcRenderer.invoke('dialog:saveFile', defaultName),
   },
   fs: {
     readDir: (path: string): Promise<DirEntry[]> =>
@@ -128,6 +157,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('git:unstage', dir, file),
     stageAll: (dir: string): Promise<GitResult> =>
       ipcRenderer.invoke('git:stageAll', dir),
+    stageTracked: (dir: string): Promise<GitResult> =>
+      ipcRenderer.invoke('git:stageTracked', dir),
     unstageAll: (dir: string): Promise<GitResult> =>
       ipcRenderer.invoke('git:unstageAll', dir),
     commit: (dir: string, message: string): Promise<GitResult> =>
@@ -178,6 +209,12 @@ contextBridge.exposeInMainWorld('api', {
       const h = (_: unknown, id: string, failedFast: boolean, error: string) => cb(id, failedFast, error)
       ipcRenderer.on('session:exit', h)
       return () => ipcRenderer.removeListener('session:exit', h)
+    },
+    // TUI mode: raw pty output for the session terminal (see session.sendInput).
+    output: (cb: (id: string, data: string) => void): (() => void) => {
+      const h = (_: unknown, id: string, data: string) => cb(id, data)
+      ipcRenderer.on('session:output', h)
+      return () => ipcRenderer.removeListener('session:output', h)
     },
     paneOutput: (cb: (id: string, data: string) => void): (() => void) => {
       const h = (_: unknown, id: string, data: string) => cb(id, data)

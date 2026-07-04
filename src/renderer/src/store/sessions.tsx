@@ -17,6 +17,15 @@ import { useNotebooks } from './notebooks'
 const isUnder = (path: string, root: string) =>
   path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`)
 
+// A subsession's name = a 1–2 word summary of its duty, i.e. its agent role
+// (kebab id → Title Case, e.g. "reviewer" → "Reviewer", "code-reviewer" →
+// "Code Reviewer"). A plain `general` subsession has no special duty, so it falls
+// back to the folder name.
+const dutyName = (agentId: string | undefined, fallback: string): string =>
+  agentId && agentId !== 'general'
+    ? agentId.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+    : fallback
+
 // Flatten the live sessions into the persisted shape. Parent links survive as an
 // index into this array (ids are regenerated on restore); a subsession always
 // follows its parent, so the index is always already known on the way back in.
@@ -35,6 +44,8 @@ async function serialize(sessions: SessionInfo[], panes: Record<string, string[]
     parentIndex: s.parentId ? live.findIndex((p) => p.id === s.parentId) : undefined,
     paneCount: panes[s.id]?.length ?? 0,
     remoteId: s.remoteId,
+    agentId: s.agentId,
+    model: s.model,
     claudeSessionId: claudeIds[i],
   }))
 }
@@ -163,14 +174,14 @@ function reducer(state: State, action: Action): State {
 }
 
 interface ContextValue extends State {
-  createSession: () => Promise<void>
-  createRemoteSession: (remote: RemoteConfig, dir: string) => Promise<void>
+  createSession: (agentId?: string, model?: string) => Promise<void>
+  createRemoteSession: (remote: RemoteConfig, dir: string, agentId?: string, model?: string) => Promise<void>
   relaunchSession: (id: string) => Promise<void>
-  addSubsession: (parentId: string, dir?: string) => Promise<void>
+  addSubsession: (parentId: string, dir?: string, agentId?: string, model?: string) => Promise<void>
   // App-control (MCP) spawners: no dialog, dir passed explicitly, return the new
   // id so the caller can orchestrate (seed a prompt via the chat store, …).
-  spawnSubsession: (parentId: string, dir?: string) => Promise<string | undefined>
-  createSessionAt: (dir: string) => Promise<string | undefined>
+  spawnSubsession: (parentId: string, dir?: string, agentId?: string, model?: string) => Promise<string | undefined>
+  createSessionAt: (dir: string, agentId?: string, model?: string) => Promise<string | undefined>
   closeSession: (id: string) => Promise<void>
   setActive: (id: string) => void
   openPane: (sessionId: string) => Promise<void>
@@ -265,11 +276,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           const s = saved[i]
           const rootDir = s.rootDir ?? s.cwd
           const parentId = s.parentIndex != null ? idByIndex[s.parentIndex] : undefined
-          // Restore the session, resuming its claude conversation (--resume
-          // <claudeSessionId>) when we have the id. Without one (older saves) we
-          // start fresh, so a missing id can't fast-fail the launch.
+          // Restore the session, resuming its claude conversation. Native mode
+          // resumes by id (--resume <claudeSessionId>) when we have one; without an
+          // id (older saves) it starts fresh so a missing id can't fast-fail. TUI
+          // mode has no resume-by-id, so it --continue's the cwd's latest convo
+          // (resume flag true, id ignored by the pty backend).
+          const resume = window.api.frontend === 'tui' ? true : !!s.claudeSessionId
           const id = await window.api.session.create(
-            s.name, s.cwd, rootDir, parentId, !!s.claudeSessionId, s.claudeSessionId,
+            s.name, s.cwd, rootDir, parentId, resume, s.claudeSessionId, s.agentId, s.model,
           )
           if (cancelled) return
           idByIndex[i] = id
@@ -282,7 +296,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           }
           dispatch({
             type: 'ADD',
-            session: { id, name: s.name, cwd: s.cwd, rootDir, parentId, remoteId: s.remoteId, state: 'idle' },
+            session: { id, name: s.name, cwd: s.cwd, rootDir, parentId, remoteId: s.remoteId, agentId: s.agentId, model: s.model, state: 'idle' },
             paneIds,
           })
         }
@@ -338,22 +352,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const createSession = useCallback(async () => {
+  const createSession = useCallback(async (agentId?: string, model?: string) => {
     const cwd = await window.api.dialog.openDir()
     if (!cwd) return
     const name = cwd.split('/').pop() || 'Session'
-    const id = await window.api.session.create(name, cwd, cwd)
-    dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, state: 'idle' } })
+    const id = await window.api.session.create(name, cwd, cwd, undefined, false, undefined, agentId, model)
+    dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, agentId, model, state: 'idle' } })
   }, [])
 
   // Start a session on a remote host. `dir` is a plain absolute path on that host;
   // we encode it as remote://id/dir so every downstream fs/git call routes over
   // ssh to the right box (see shared/remotePath.ts).
-  const createRemoteSession = useCallback(async (remote: RemoteConfig, dir: string) => {
+  const createRemoteSession = useCallback(async (remote: RemoteConfig, dir: string, agentId?: string, model?: string) => {
     const cwd = makeRemotePath(remote.id, dir)
     const name = dir.split('/').filter(Boolean).pop() || remote.label
-    const id = await window.api.session.create(name, cwd, cwd)
-    dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, remoteId: remote.id, state: 'idle' } })
+    const id = await window.api.session.create(name, cwd, cwd, undefined, false, undefined, agentId, model)
+    dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, remoteId: remote.id, agentId, model, state: 'idle' } })
   }, [])
 
   // A subsession runs its own Claude in the parent's directory, but scopes its
@@ -361,7 +375,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // For a remote parent the local dir dialog can't browse the remote, so the
   // caller (Sidebar) supplies `dir` — a plain path on the remote — via the remote
   // folder picker; local parents fall back to the native dialog.
-  const addSubsession = useCallback(async (parentId: string, dir?: string) => {
+  const addSubsession = useCallback(async (parentId: string, dir?: string, agentId?: string, model?: string) => {
     const parent = stateRef.current.sessions.find((s) => s.id === parentId)
     if (!parent) return
     let picked = dir
@@ -371,11 +385,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!picked) return
     }
     const rootDir = parent.remoteId ? makeRemotePath(parent.remoteId, picked) : picked
-    const name = picked.split('/').filter(Boolean).pop() || 'Subsession'
-    const id = await window.api.session.create(name, parent.cwd, rootDir, parentId)
+    const name = dutyName(agentId, picked.split('/').filter(Boolean).pop() || 'Subsession')
+    const id = await window.api.session.create(name, parent.cwd, rootDir, parentId, false, undefined, agentId, model)
     dispatch({
       type: 'ADD',
-      session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, state: 'idle' },
+      session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, agentId, model, state: 'idle' },
     })
   }, [])
 
@@ -383,26 +397,26 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // folder — the same-folder multi-agent case — so several Claude backends run in
   // one directory; pass `dir` (a plain path on the parent's host) to scope it to a
   // subdirectory instead. Optionally seeds an initial prompt. Returns the new id.
-  const spawnSubsession = useCallback(async (parentId: string, dir?: string): Promise<string | undefined> => {
+  const spawnSubsession = useCallback(async (parentId: string, dir?: string, agentId?: string, model?: string): Promise<string | undefined> => {
     const parent = stateRef.current.sessions.find((s) => s.id === parentId)
     if (!parent) return undefined
     const picked = dir ?? parseTarget(parent.cwd).path  // plain path; default = same folder
     const rootDir = parent.remoteId ? makeRemotePath(parent.remoteId, picked) : picked
-    const name = picked.split('/').filter(Boolean).pop() || 'Subsession'
-    const id = await window.api.session.create(name, parent.cwd, rootDir, parentId)
+    const name = dutyName(agentId, picked.split('/').filter(Boolean).pop() || 'Subsession')
+    const id = await window.api.session.create(name, parent.cwd, rootDir, parentId, false, undefined, agentId, model)
     dispatch({
       type: 'ADD',
-      session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, state: 'idle' },
+      session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, agentId, model, state: 'idle' },
     })
     return id
   }, [])
 
   // Open a new top-level session in `dir` from app-control (no dialog). Local only
   // (dir is a plain absolute path); remote creation stays interactive for now.
-  const createSessionAt = useCallback(async (dir: string): Promise<string | undefined> => {
+  const createSessionAt = useCallback(async (dir: string, agentId?: string, model?: string): Promise<string | undefined> => {
     const name = dir.split('/').filter(Boolean).pop() || 'Session'
-    const id = await window.api.session.create(name, dir, dir)
-    dispatch({ type: 'ADD', session: { id, name, cwd: dir, rootDir: dir, state: 'idle' } })
+    const id = await window.api.session.create(name, dir, dir, undefined, false, undefined, agentId, model)
+    dispatch({ type: 'ADD', session: { id, name, cwd: dir, rootDir: dir, agentId, model, state: 'idle' } })
     return id
   }, [])
 

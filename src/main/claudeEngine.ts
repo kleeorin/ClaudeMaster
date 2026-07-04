@@ -20,6 +20,10 @@ export function claudeArgs(opts: {
   resume?: boolean
   mcpConfig?: string   // JSON string (or path) for --mcp-config; adds the app-control server
   model?: string
+  // --- agent/role config (see agents.ts) ---
+  appendSystemPrompt?: string  // the agent's persistent charter → --append-system-prompt
+  allowedTools?: string[]      // agent tool whitelist → --allowedTools
+  disallowedTools?: string[]   // agent tool blacklist → MERGED into the NOTEBOOK_DENY value
   extra?: string[]
 }): string[] {
   const a = [
@@ -38,21 +42,34 @@ export function claudeArgs(opts: {
   // configured MCP servers keep working alongside it.
   if (opts.mcpConfig) a.push('--mcp-config', opts.mcpConfig)
   if (opts.model) a.push('--model', opts.model)
+  // The agent's charter rides as an appended system prompt so the role persists
+  // for the WHOLE session, not just the seeded first turn.
+  if (opts.appendSystemPrompt) a.push('--append-system-prompt', opts.appendSystemPrompt)
+  if (opts.allowedTools?.length) a.push('--allowedTools', opts.allowedTools.join(','))
   // Funnel .ipynb edits through the app-control notebook tools. A deny rule
   // (unlike the permission-handler guard in handlePermission) also beats an
   // "allow always" and acceptEdits mode — the cases where the tool never prompts.
   // NotebookEdit only ever targets notebooks, so deny it by name; scope the
   // general file tools to the .ipynb glob so normal code editing is unaffected.
-  a.push('--disallowedTools', NOTEBOOK_DENY)
+  // The agent's own disallowed tools MERGE into this one value (a second
+  // --disallowedTools flag would not reliably combine), so NOTEBOOK_DENY always
+  // survives whatever role is chosen.
+  a.push('--disallowedTools', disallowedValue(opts.disallowedTools))
   if (opts.extra) a.push(...opts.extra)
   return a
+}
+
+// The single --disallowedTools value: NOTEBOOK_DENY plus any agent-scoped denials.
+// Shared with the TUI backend so both frontends keep the notebook funnel.
+export function disallowedValue(agentDisallowed?: string[]): string {
+  return agentDisallowed?.length ? `${NOTEBOOK_DENY},${agentDisallowed.join(',')}` : NOTEBOOK_DENY
 }
 
 // Comma-separated (the flag accepts comma or space) so it's one unambiguous argv
 // value. `**/*.ipynb` matches notebooks at any depth. NB: the exact path-glob
 // matching is the one bit worth confirming live (a wrong glob silently fails to
 // match — the handlePermission guard still covers the prompting path).
-const NOTEBOOK_DENY = 'NotebookEdit,Write(**/*.ipynb),Edit(**/*.ipynb)'
+export const NOTEBOOK_DENY = 'NotebookEdit,Write(**/*.ipynb),Edit(**/*.ipynb)'
 
 // The native file tools we intercept for notebooks, and where each carries its
 // target path. If a call targets a .ipynb, return the deny message steering Claude

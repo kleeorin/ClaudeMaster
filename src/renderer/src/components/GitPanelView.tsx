@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GitStatus, GitFileStatus, GitCommit } from '../../../shared/types'
+import { useFileBrowser } from '../store/fileBrowser'
 
 type Mode = 'changes' | 'log'
 
@@ -77,8 +78,29 @@ export function GitPanelView({ sessionId, cwd }: Props) {
   const [creating, setCreating] = useState(false)
   const [newBranch, setNewBranch] = useState('')
 
+  const { openVirtual } = useFileBrowser()
+
   const modeRef = useRef(mode)
   modeRef.current = mode
+
+  // Send the currently shown diff to the main pane as an editable in-memory tab,
+  // so it can be read/scrolled at full size (and optionally saved to disk).
+  const sendDiffToPane = useCallback(() => {
+    if (!diff.trim()) return
+    let label: string
+    let key: string
+    if (selectedCommit) {
+      label = `${selectedCommit.slice(0, 7)}.diff`
+      key = `virtual:git-show:${selectedCommit}`
+    } else if (selected) {
+      const base = selected.path.split('/').pop() ?? selected.path
+      label = `${base}.diff`
+      key = `virtual:git-diff:${selected.staged ? 'staged' : 'work'}:${selected.path}`
+    } else {
+      return
+    }
+    openVirtual(sessionId, cwd, key, label, { content: diff, language: label })
+  }, [diff, selected, selectedCommit, openVirtual, sessionId, cwd])
 
   const refresh = useCallback(async () => {
     const s = await window.api.git.status(cwd)
@@ -110,6 +132,7 @@ export function GitPanelView({ sessionId, cwd }: Props) {
   const files = status && status.repo === true ? status.files : []
   const staged = useMemo(() => files.filter((f) => f.staged), [files])
   const unstaged = useMemo(() => files.filter((f) => f.unstaged), [files])
+  const hasUntracked = useMemo(() => unstaged.some((f) => f.untracked), [unstaged])
 
   // Select a working-tree file (clears any commit selection).
   const selectFile = useCallback((path: string, isStaged: boolean) => {
@@ -347,7 +370,7 @@ export function GitPanelView({ sessionId, cwd }: Props) {
       <div className="shrink-0 max-h-[45%] overflow-y-auto px-1.5 py-1.5 space-y-2 border-b border-ctp-surface0">
         <Section
           title={`Staged (${staged.length})`}
-          action={staged.length ? { label: 'Unstage all', onClick: () => run(() => window.api.git.unstageAll(cwd)) } : undefined}
+          actions={staged.length ? [{ label: 'Unstage all', onClick: () => run(() => window.api.git.unstageAll(cwd)) }] : undefined}
         >
           {staged.map((f) => (
             <FileRow
@@ -363,7 +386,12 @@ export function GitPanelView({ sessionId, cwd }: Props) {
 
         <Section
           title={`Changed (${unstaged.length})`}
-          action={unstaged.length ? { label: 'Stage all', onClick: () => run(() => window.api.git.stageAll(cwd)) } : undefined}
+          actions={unstaged.length ? [
+            // `git add -u` — only tracked files; shown only when it would differ
+            // from "Stage all" (i.e. there's at least one untracked file to skip).
+            ...(hasUntracked ? [{ label: 'Stage tracked', title: 'Stage modified & deleted tracked files only (git add -u)', onClick: () => run(() => window.api.git.stageTracked(cwd)) }] : []),
+            { label: 'Stage all', onClick: () => run(() => window.api.git.stageAll(cwd)) },
+          ] : undefined}
         >
           {unstaged.map((f) => (
             <FileRow
@@ -403,9 +431,23 @@ export function GitPanelView({ sessionId, cwd }: Props) {
       )}
 
       {/* Diff (shared by both tabs) */}
-      <div className="flex-1 min-h-0 overflow-auto bg-ctp-base">
+      <div className="flex-1 min-h-0 flex flex-col bg-ctp-base">
         {selected || selectedCommit ? (
-          <DiffView text={diff} />
+          <>
+            <div className="shrink-0 flex items-center justify-end px-2 py-1 border-b border-ctp-surface0">
+              <button
+                onClick={sendDiffToPane}
+                disabled={!diff.trim()}
+                title="Open this diff as an editable tab in the main pane"
+                className="text-[10px] text-ctp-overlay hover:text-ctp-text disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Open in editor ↗
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-auto">
+              <DiffView text={diff} />
+            </div>
+          </>
         ) : (
           <div className="h-full flex items-center justify-center text-xs text-ctp-overlay">
             {mode === 'log' ? 'Select a commit to view its diff' : 'Select a file to view its diff'}
@@ -441,14 +483,18 @@ function Shell({ children }: { children: React.ReactNode }) {
   return <div className="flex flex-col h-full bg-ctp-base border-l border-ctp-surface0 overflow-hidden">{children}</div>
 }
 
-function Section({ title, action, children }: { title: string; action?: { label: string; onClick: () => void }; children: React.ReactNode }) {
+interface SectionAction { label: string; onClick: () => void; title?: string }
+
+function Section({ title, actions, children }: { title: string; actions?: SectionAction[]; children: React.ReactNode }) {
   return (
     <div>
-      <div className="flex items-center justify-between px-1.5 pb-0.5">
+      <div className="flex items-center justify-between gap-2 px-1.5 pb-0.5">
         <span className="text-[10px] font-semibold text-ctp-overlay uppercase tracking-widest">{title}</span>
-        {action && (
-          <button onClick={action.onClick} className="text-[10px] text-ctp-overlay hover:text-ctp-text">{action.label}</button>
-        )}
+        <div className="flex items-center gap-2">
+          {actions?.map((a) => (
+            <button key={a.label} onClick={a.onClick} title={a.title} className="text-[10px] text-ctp-overlay hover:text-ctp-text whitespace-nowrap">{a.label}</button>
+          ))}
+        </div>
       </div>
       <div className="space-y-0.5">{children}</div>
     </div>

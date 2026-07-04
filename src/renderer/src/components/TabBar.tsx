@@ -21,8 +21,8 @@ export function TabBar({ openFiles, dirtyFiles, activeTab, onSelect, onClose, sp
       {openFiles.map((f) => (
         <Tab
           key={f.path}
-          label={f.path.split('/').pop() ?? f.path}
-          title={f.path}
+          label={f.label ?? f.path.split('/').pop() ?? f.path}
+          title={f.virtual ? `${f.label ?? ''} (in memory)` : f.path}
           dirty={dirtyFiles.includes(f.path)}
           active={activeTab === f.path}
           onSelect={() => onSelect(f.path)}

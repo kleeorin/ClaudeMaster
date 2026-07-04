@@ -12,11 +12,24 @@ export interface Clipboard {
 // keyed by absolute path, which always starts with '/', so this never collides.
 export const CLAUDE_TAB = 'claude'
 
+// An in-memory tab not backed by a file on disk (e.g. a git diff sent to the
+// main pane). It carries its own initial content and shows a "Save as…" action
+// instead of an in-place save.
+export interface VirtualDoc {
+  content: string
+  language?: string  // filename-like hint for syntax highlighting, e.g. 'x.diff'
+}
+
 // A file open as a tab in the main column. Notebooks get the native cells+kernel
 // view; everything else gets the code/preview view — both share the same slot.
+// A `virtual` doc has no disk path; its `path` is a synthetic tab key (never
+// starting with '/', so it can't collide with a real file or be caught by a
+// rename remap).
 export interface OpenFile {
   path: string
   isNotebook: boolean
+  label?: string  // tab caption for virtual docs (real files derive it from path)
+  virtual?: VirtualDoc
 }
 
 interface SessionBrowser {
@@ -34,6 +47,7 @@ type Action =
   | { type: 'CLOSE'; sessionId: string }
   | { type: 'NAVIGATE'; sessionId: string; path: string }
   | { type: 'OPEN_FILE'; sessionId: string; path: string; isNotebook: boolean }
+  | { type: 'OPEN_VIRTUAL'; sessionId: string; cwd: string; path: string; label: string; doc: VirtualDoc }
   | { type: 'CLOSE_FILE'; sessionId: string; path: string }
   | { type: 'SET_ACTIVE_TAB'; sessionId: string; tab: string }
   | { type: 'SET_DIRTY'; sessionId: string; path: string; dirty: boolean }
@@ -66,6 +80,19 @@ function reducer(state: State, action: Action): State {
         ? b.openFiles
         : [...b.openFiles, { path: action.path, isNotebook: action.isNotebook }]
       return patch({ ...b, openFiles, activeTab: action.path })
+    }
+    case 'OPEN_VIRTUAL': {
+      // A virtual tab (e.g. a diff from the git panel) can be opened while the
+      // Files panel has never been opened for this session, so there may be no
+      // browser yet. Create one without popping the side panel (open: false).
+      const base = b ?? { ...freshBrowser(action.cwd), open: false }
+      // Reuse an existing virtual tab with the same key (just focus it — don't
+      // clobber content the user may have edited); otherwise append a new one.
+      const exists = base.openFiles.some((f) => f.path === action.path)
+      const openFiles = exists
+        ? base.openFiles
+        : [...base.openFiles, { path: action.path, isNotebook: false, label: action.label, virtual: action.doc }]
+      return patch({ ...base, openFiles, activeTab: action.path })
     }
     case 'CLOSE_FILE': {
       if (!b) return state
@@ -126,6 +153,7 @@ interface ContextValue {
   closeBrowser: (sessionId: string) => void
   navigate: (sessionId: string, path: string) => void
   openFile: (sessionId: string, path: string, isNotebook: boolean) => void
+  openVirtual: (sessionId: string, cwd: string, key: string, label: string, doc: VirtualDoc) => void
   closeFile: (sessionId: string, path: string) => void
   setActiveTab: (sessionId: string, tab: string) => void
   setFileDirty: (sessionId: string, path: string, dirty: boolean) => void
@@ -169,6 +197,10 @@ export function FileBrowserProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'OPEN_FILE', sessionId, path, isNotebook })
   }, [])
 
+  const openVirtual = useCallback((sessionId: string, cwd: string, key: string, label: string, doc: VirtualDoc) => {
+    dispatch({ type: 'OPEN_VIRTUAL', sessionId, cwd, path: key, label, doc })
+  }, [])
+
   const closeFile = useCallback((sessionId: string, path: string) => {
     const b = stateRef.current[sessionId]
     if (b?.dirtyFiles.includes(path) && !window.confirm('Discard unsaved changes?')) return
@@ -188,7 +220,7 @@ export function FileBrowserProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <FileBrowserContext.Provider value={{ browsers, openBrowser, closeBrowser, navigate, openFile, closeFile, setActiveTab, setFileDirty, renamePath, clipboard, setClipboard }}>
+    <FileBrowserContext.Provider value={{ browsers, openBrowser, closeBrowser, navigate, openFile, openVirtual, closeFile, setActiveTab, setFileDirty, renamePath, clipboard, setClipboard }}>
       {children}
     </FileBrowserContext.Provider>
   )

@@ -4,6 +4,7 @@ import { useFileBrowser, CLAUDE_TAB } from './store/fileBrowser'
 import { Sidebar } from './components/Sidebar'
 import { Toolbar } from './components/Toolbar'
 import { ChatView } from './components/ChatView'
+import { TerminalView } from './components/TerminalView'
 import { PaneView } from './components/PaneView'
 import { TabBar } from './components/TabBar'
 import { ContextMenu } from './components/ContextMenu'
@@ -15,6 +16,7 @@ import { useResizable, ResizeHandle } from './hooks/useResizable'
 
 const NotebookView = lazy(() => import('./components/NotebookView').then(m => ({ default: m.NotebookView })))
 const FileView = lazy(() => import('./components/FileView').then(m => ({ default: m.FileView })))
+const VirtualFileView = lazy(() => import('./components/VirtualFileView').then(m => ({ default: m.VirtualFileView })))
 
 // The most informative bit of a failed session's output is usually its last
 // non-empty line (e.g. "bash: claude: command not found").
@@ -23,9 +25,14 @@ function lastLine(text: string): string {
   return line.length > 120 ? line.slice(-120) : line
 }
 
+// The Claude chat surface for the whole app, chosen at startup: the native
+// stream-json chat, or the real interactive Claude Code TUI in a terminal. Both
+// take the same { sessionId, isActive } props and share every other panel.
+const ClaudeSurface = window.api.frontend === 'tui' ? TerminalView : ChatView
+
 export function App() {
   const { sessions, activeId, paneIdsFor, visiblePanesFor, addPane, removePane, closeSession, relaunchSession } = useSessions()
-  const { browsers, closeFile, setActiveTab, setFileDirty } = useFileBrowser()
+  const { browsers, openFile, closeFile, setActiveTab, setFileDirty } = useFileBrowser()
   const { open: gitOpen } = useGitPanel()
   const gitPanelOpen = activeId ? (gitOpen[activeId] ?? false) : false
   const browser = activeId ? browsers[activeId] : undefined
@@ -154,7 +161,7 @@ export function App() {
                               </button>
                             </div>
                           )}
-                          <ChatView sessionId={s.id} isActive={visible} />
+                          <ClaudeSurface sessionId={s.id} isActive={visible} />
                         </div>
                       )
                     })}
@@ -173,7 +180,14 @@ export function App() {
                         return (
                           <div key={`${s.id}:${f.path}`} className={`absolute inset-0 ${visible ? 'block' : 'hidden'}`}>
                             <Suspense fallback={null}>
-                              {f.isNotebook ? (
+                              {f.virtual ? (
+                                <VirtualFileView
+                                  label={f.label ?? (f.path.split('/').pop() ?? f.path)}
+                                  doc={f.virtual}
+                                  onDirtyChange={(d) => setFileDirty(s.id, f.path, d)}
+                                  onSavedAs={(real) => { closeFile(s.id, f.path); openFile(s.id, real, false) }}
+                                />
+                              ) : f.isNotebook ? (
                                 <NotebookView path={f.path} onDirtyChange={(d) => setFileDirty(s.id, f.path, d)} />
                               ) : (
                                 <FileView path={f.path} onDirtyChange={(d) => setFileDirty(s.id, f.path, d)} />

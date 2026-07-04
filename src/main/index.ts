@@ -4,7 +4,11 @@ import { homedir } from 'os'
 import { readdir, readFile, writeFile, stat, cp, rename, rm, access, mkdir } from 'fs/promises'
 import { watch } from 'fs'
 import type { DirEntry, FilePreview, WriteResult } from '../shared/types'
-import { SessionManager } from './sessionManager'
+import { SessionManager, type SessionBackend } from './sessionManager'
+import { PtySessionManager } from './ptySessionManager'
+import { getFrontend, setFrontend, type Frontend } from './appSettings'
+import { isAgent, listAgents } from './agents'
+import { listModels } from './models'
 import * as conversations from './conversations'
 import { AppControlMcpServer } from './mcpServer'
 import { PaneManager } from './paneManager'
@@ -21,10 +25,18 @@ import type { RemoteConfig, SavedSession } from '../shared/types'
 // sessions reach it over a reverse tunnel (-R <port>) — the URL is 127.0.0.1:<port>
 // on both ends, so the same config works locally and remotely.
 const appMcp = new AppControlMcpServer()
-const sessions = new SessionManager({
-  mcpConfig: (id) => appMcp.configFor(id),
+// A global startup setting picks the whole app's frontend (restart to change).
+// Both backends get the same app-control wiring, so the notebook MCP tools + the
+// .ipynb funnel work identically in either — only the chat surface + claude I/O
+// differ (native stream-json chat vs the real interactive Claude Code TUI in a pty).
+const frontend: Frontend = getFrontend()
+const backendOpts = {
+  mcpConfig: (id: string) => appMcp.configFor(id),
   reverseTunnelPort: () => appMcp.portNumber,
-})
+}
+const sessions: SessionBackend = frontend === 'tui'
+  ? new PtySessionManager(backendOpts)
+  : new SessionManager(backendOpts)
 const panes = new PaneManager()
 const jupyter = new JupyterManager()
 let mainWindow: BrowserWindow | null = null
@@ -61,6 +73,9 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       plugins: true,  // enable Chromium's built-in PDF viewer (FileView iframe)
+      // Hand the chosen frontend to the preload synchronously (before the renderer
+      // runs) so App can pick its chat surface without an async round-trip.
+      additionalArguments: [`--cm-frontend=${frontend}`],
     },
   })
 
@@ -94,6 +109,10 @@ function createWindow(): void {
   sessions.on('exit', (id: string, failedFast: boolean, error: string) => {
     mainWindow?.webContents.send('session:exit', id, failedFast, error)
   })
+  // TUI mode: raw pty output for the session terminal (native mode never emits it).
+  sessions.on('output', (id: string, data: string) => {
+    mainWindow?.webContents.send('session:output', id, data)
+  })
 
   panes.on('output', (id: string, data: string) => {
     mainWindow?.webContents.send('pane:output', id, data)
@@ -119,8 +138,8 @@ async function remoteFor(encodedPath: string): Promise<RemoteConfig | undefined>
   return (await remotes.get(remoteId)) ?? undefined
 }
 
-ipcMain.handle('session:create', async (_, name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string) =>
-  sessions.create(name, cwd, rootDir ?? cwd, parentId, resume, await remoteFor(cwd), claudeSessionId)
+ipcMain.handle('session:create', async (_, name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string) =>
+  sessions.create(name, cwd, rootDir ?? cwd, parentId, resume, await remoteFor(cwd), claudeSessionId, agentId, model)
 )
 ipcMain.handle('session:destroy', (_, id: string) => { appMcp.release(id); sessions.destroy(id) })
 ipcMain.handle('session:relaunch', (_, id: string) => sessions.relaunch(id))
@@ -147,6 +166,20 @@ ipcMain.handle('session:listConversations', (_, cwd: string) => conversations.li
 ipcMain.handle('session:readConversation', (_, cwd: string, id: string) => conversations.readConversation(cwd, id))
 ipcMain.on('session:resumeInto', (_, id: string, claudeSessionId: string) => sessions.resumeInto(id, claudeSessionId))
 ipcMain.on('session:clear', (_, id: string) => sessions.restartFresh(id))
+// TUI mode: keystroke input + terminal resize for the session pty (no-ops in native).
+ipcMain.on('session:input', (_, id: string, data: string) => sessions.sendInput(id, data))
+ipcMain.on('session:resize', (_, id: string, cols: number, rows: number) => sessions.resize(id, cols, rows))
+
+// App settings. The frontend is read once at startup (both the backend and the
+// renderer's chat surface are chosen then), so setting it only takes effect on the
+// next launch — the renderer surfaces a "restart to apply" notice.
+ipcMain.handle('settings:getFrontend', () => getFrontend())
+ipcMain.handle('settings:setFrontend', (_, f: Frontend) => { setFrontend(f) })
+
+// The agent roles a new session can be created as (for the sidebar role picker).
+ipcMain.handle('agents:list', () => listAgents())
+// The models the picker offers (for the sidebar model picker).
+ipcMain.handle('models:list', () => listModels())
 
 // --- App-control MCP tools ---------------------------------------------------
 // The renderer publishes the active pane; tools that mutate the UI round-trip
@@ -161,9 +194,15 @@ ipcMain.on('appcontrol:response', (_, reqId: number, result: { text?: string; er
 
 appMcp.register({
   name: 'list_sessions',
-  description: 'List the ClaudeMaster sessions currently open (id, name, working directory, state).',
+  description: 'List the ClaudeMaster sessions currently open (id, name, working directory, state, agent role, and parentId for subsessions).',
   inputSchema: { type: 'object', properties: {} },
-  handler: async () => ({ text: JSON.stringify(sessions.list().map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, state: s.state }))) }),
+  handler: async () => ({ text: JSON.stringify(sessions.list().map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, state: s.state, agent: s.agentId ?? 'general', parentId: s.parentId }))) }),
+})
+appMcp.register({
+  name: 'list_agents',
+  description: 'List the agent roles a session can be spawned as (id, name, what each is for). Pass an id as the `agent` argument to spawn_subsession / create_session to give the new session a persistent role (charter + tool scope + model).',
+  inputSchema: { type: 'object', properties: {} },
+  handler: async () => ({ text: JSON.stringify(listAgents()) }),
 })
 appMcp.register({
   name: 'read_active_pane',
@@ -306,25 +345,40 @@ appMcp.register({
 // The multi-agent surface: spawn helpers in the same folder, open/close sessions,
 // and orchestrate siblings. All are MCP tools, so the can_use_tool prompt gates
 // them (wide + permission-gated). `sessionId` is the CALLING session's id.
+// Validate an optional `agent` arg against the registry; returns the id (or
+// undefined for none), or an error listing the valid ids.
+function resolveAgentArg(args: Record<string, unknown>): { agent?: string } | { error: string } {
+  if (args.agent == null || args.agent === '') return {}
+  const agent = String(args.agent)
+  if (!isAgent(agent)) return { error: `unknown agent "${agent}". Call list_agents for the valid roles.` }
+  return { agent }
+}
+const agentProp = { agent: { type: 'string', description: 'Optional agent role for the new session (id from list_agents, e.g. "explorer", "reviewer", "implementer"). Omit for a plain "general" session. The role persists for the whole session — charter + tool scope + model.' } }
+const modelProp = { model: { type: 'string', description: 'Optional model override for the new session (e.g. "claude-opus-4-8", "claude-haiku-4-5-20251001", "claude-fable-5"). Overrides the role\'s default model. Omit to use the role\'s model, else the account default.' } }
+const modelArg = (args: Record<string, unknown>) => (args.model != null && args.model !== '' ? String(args.model) : undefined)
 appMcp.register({
   name: 'spawn_subsession',
-  description: "Spawn a new Claude subsession. Defaults to the SAME folder as the calling session (several agents working in one directory); pass an absolute `dir` to scope it to a subdirectory. Optional `prompt` seeds its first turn. Returns the new session id (use it with run_in_session).",
-  inputSchema: { type: 'object', properties: { dir: { type: 'string', description: "Absolute path; defaults to the calling session's own folder" }, prompt: { type: 'string' } } },
+  description: "Spawn a new Claude subsession. Defaults to the SAME folder as the calling session (several agents working in one directory); pass an absolute `dir` to scope it to a subdirectory. Optional `agent` gives it a persistent role (see list_agents); optional `model` overrides the model (cheap Haiku for grunt work, Opus for hard tasks). Optional `prompt` seeds its first turn. Returns the new session id (use it with run_in_session).",
+  inputSchema: { type: 'object', properties: { dir: { type: 'string', description: "Absolute path; defaults to the calling session's own folder" }, ...agentProp, ...modelProp, prompt: { type: 'string' } } },
   handler: async (sessionId, args) => {
     const dir = args.dir != null ? String(args.dir) : undefined
     if (dir) { try { await access(dir) } catch { return { error: `no such directory: ${dir}` } } }
-    return askRenderer('spawnSubsession', sessionId, { dir, prompt: args.prompt })
+    const a = resolveAgentArg(args)
+    if ('error' in a) return a
+    return askRenderer('spawnSubsession', sessionId, { dir, agent: a.agent, model: modelArg(args), prompt: args.prompt })
   },
 })
 appMcp.register({
   name: 'create_session',
-  description: 'Open a new top-level Claude session in the given absolute directory. Optional `prompt` seeds its first turn. Returns the new session id.',
-  inputSchema: { type: 'object', properties: { dir: { type: 'string' }, prompt: { type: 'string' } }, required: ['dir'] },
+  description: 'Open a new top-level Claude session in the given absolute directory. Optional `agent` gives it a persistent role (see list_agents); optional `model` overrides the model. Optional `prompt` seeds its first turn. Returns the new session id.',
+  inputSchema: { type: 'object', properties: { dir: { type: 'string' }, ...agentProp, ...modelProp, prompt: { type: 'string' } }, required: ['dir'] },
   handler: async (sessionId, args) => {
     const dir = String(args.dir ?? '')
     if (!dir) return { error: 'dir is required' }
     try { await access(dir) } catch { return { error: `no such directory: ${dir}` } }
-    return askRenderer('createSession', sessionId, { dir, prompt: args.prompt })
+    const a = resolveAgentArg(args)
+    if ('error' in a) return a
+    return askRenderer('createSession', sessionId, { dir, agent: a.agent, model: modelArg(args), prompt: args.prompt })
   },
 })
 appMcp.register({
@@ -352,6 +406,24 @@ appMcp.register({
     // Seed via the renderer so the target's transcript shows the injected prompt
     // as a user turn (the chat store echoes it), then sends over stream-json.
     return askRenderer('runInSession', sessionId, { id, prompt })
+  },
+})
+appMcp.register({
+  name: 'report_to_parent',
+  description: "Report a result back to the session that spawned you (a subsession's parent). Send a tight `summary` of what you found or did — this closes the orchestration loop so the parent gets your distilled result instead of scraping your transcript. Optional `status` (e.g. 'done', 'blocked', 'failed'). The report is QUEUED and delivered when the parent is next idle, so it never interrupts the parent mid-task; several siblings' reports batch into one turn. Errors if this is a top-level session with no parent.",
+  inputSchema: { type: 'object', properties: { summary: { type: 'string' }, status: { type: 'string' } }, required: ['summary'] },
+  handler: async (sessionId, args) => {
+    const summary = String(args.summary ?? '')
+    if (!summary) return { error: 'summary is required' }
+    const parentId = sessions.list().find((s) => s.id === sessionId)?.parentId
+    if (!parentId) return { error: 'this is a top-level session — it has no parent to report to.' }
+    if (!sessions.list().some((s) => s.id === parentId)) return { error: 'the parent session is no longer open.' }
+    const status = args.status != null ? String(args.status) : ''
+    // Tagged so the parent knows it came from a subsession. The renderer queues it
+    // and flushes to the parent's transcript on the parent's next idle (deferred
+    // delivery — see AppControlBridge), so a busy parent isn't interrupted.
+    const text = `[report from subsession ${sessionId}${status ? ` — ${status}` : ''}]\n\n${summary}`
+    return askRenderer('reportToParent', sessionId, { parentId, text })
   },
 })
 ipcMain.handle('remotes:list', () => remotes.list())
@@ -608,6 +680,7 @@ ipcMain.handle('git:diff', (_, dir: string, file: string, staged: boolean, untra
 ipcMain.handle('git:stage', (_, dir: string, file: string) => gitManager.stage(dir, file))
 ipcMain.handle('git:unstage', (_, dir: string, file: string) => gitManager.unstage(dir, file))
 ipcMain.handle('git:stageAll', (_, dir: string) => gitManager.stageAll(dir))
+ipcMain.handle('git:stageTracked', (_, dir: string) => gitManager.stageTracked(dir))
 ipcMain.handle('git:unstageAll', (_, dir: string) => gitManager.unstageAll(dir))
 ipcMain.handle('git:commit', (_, dir: string, message: string) => gitManager.commit(dir, message))
 ipcMain.handle('git:log', (_, dir: string, limit?: number) => gitManager.log(dir, limit))
@@ -641,6 +714,16 @@ ipcMain.handle('dialog:openDir', async (_, defaultPath?: string) => {
     defaultPath: defaultPath || homedir(),
   })
   return result.canceled ? null : result.filePaths[0]
+})
+
+// Native "Save as…" picker — returns the chosen absolute path (local), or null
+// if cancelled. Writing is done separately via fs:writeFile.
+ipcMain.handle('dialog:saveFile', async (_, defaultName?: string) => {
+  if (!mainWindow) return null
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: defaultName ? join(homedir(), defaultName) : homedir(),
+  })
+  return result.canceled ? null : (result.filePath ?? null)
 })
 
 app.whenReady().then(async () => {
