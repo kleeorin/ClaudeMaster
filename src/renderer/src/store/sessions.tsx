@@ -8,7 +8,7 @@ import {
   useRef,
   type ReactNode,
 } from 'react'
-import type { SessionInfo, SessionState, SavedSession, RemoteConfig } from '../../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, RemoteConfig, PermissionMode, SetModeResult } from '../../../shared/types'
 import { makeRemotePath, parseTarget } from '../../../shared/remotePath'
 import { playChime } from '../lib/chime'
 import { useNotebooks } from './notebooks'
@@ -46,6 +46,7 @@ async function serialize(sessions: SessionInfo[], panes: Record<string, string[]
     remoteId: s.remoteId,
     agentId: s.agentId,
     model: s.model,
+    permissionMode: s.permissionMode,
     claudeSessionId: claudeIds[i],
   }))
 }
@@ -63,6 +64,7 @@ type Action =
   | { type: 'ADD'; session: SessionInfo; paneIds?: string[] }
   | { type: 'REMOVE'; id: string }
   | { type: 'STATE_CHANGE'; id: string; state: SessionState }
+  | { type: 'SET_MODE'; id: string; mode: PermissionMode }
   | { type: 'EXITED'; id: string; error: string }
   | { type: 'SET_ACTIVE'; id: string }
   | { type: 'ADD_ATTENTION'; id: string }
@@ -118,6 +120,11 @@ function reducer(state: State, action: Action): State {
             ? { ...s, state: action.state, exitError: action.state === 'exited' ? s.exitError : undefined }
             : s
         ),
+      }
+    case 'SET_MODE':
+      return {
+        ...state,
+        sessions: state.sessions.map((s) => (s.id === action.id ? { ...s, permissionMode: action.mode } : s)),
       }
     case 'EXITED':
       // Keep the row; mark it failed and stash the reason for the banner/tooltip.
@@ -183,6 +190,9 @@ interface ContextValue extends State {
   spawnSubsession: (parentId: string, dir?: string, agentId?: string, model?: string) => Promise<string | undefined>
   createSessionAt: (dir: string, agentId?: string, model?: string) => Promise<string | undefined>
   closeSession: (id: string) => Promise<void>
+  // Set a session's permission mode. Persists to the store (so autosave/restore
+  // keep it) and asks main to apply it live or on next launch.
+  setSessionMode: (id: string, mode: PermissionMode) => Promise<SetModeResult>
   setActive: (id: string) => void
   openPane: (sessionId: string) => Promise<void>
   addPane: (sessionId: string, afterPaneId?: string) => Promise<void>
@@ -283,7 +293,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           // (resume flag true, id ignored by the pty backend).
           const resume = window.api.frontend === 'tui' ? true : !!s.claudeSessionId
           const id = await window.api.session.create(
-            s.name, s.cwd, rootDir, parentId, resume, s.claudeSessionId, s.agentId, s.model,
+            s.name, s.cwd, rootDir, parentId, resume, s.claudeSessionId, s.agentId, s.model, s.permissionMode,
           )
           if (cancelled) return
           idByIndex[i] = id
@@ -296,7 +306,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           }
           dispatch({
             type: 'ADD',
-            session: { id, name: s.name, cwd: s.cwd, rootDir, parentId, remoteId: s.remoteId, agentId: s.agentId, model: s.model, state: 'idle' },
+            session: { id, name: s.name, cwd: s.cwd, rootDir, parentId, remoteId: s.remoteId, agentId: s.agentId, model: s.model, permissionMode: s.permissionMode, state: 'idle' },
             paneIds,
           })
         }
@@ -420,6 +430,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return id
   }, [])
 
+  const setSessionMode = useCallback(async (id: string, mode: PermissionMode): Promise<SetModeResult> => {
+    // Optimistically store the mode (autosave/restore keep it); main applies it
+    // live if the CLI supports it, else on the next launch.
+    dispatch({ type: 'SET_MODE', id, mode })
+    return window.api.perms.setMode(id, mode)
+  }, [])
+
   const closeSession = useCallback(async (id: string) => {
     // Closing a session also closes any subsessions hanging off it.
     const closing = stateRef.current.sessions.filter((s) => s.id === id || s.parentId === id)
@@ -509,7 +526,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   return (
     <SessionContext.Provider value={{
-      ...state, createSession, createRemoteSession, relaunchSession, addSubsession, spawnSubsession, createSessionAt, closeSession, setActive,
+      ...state, createSession, createRemoteSession, relaunchSession, addSubsession, spawnSubsession, createSessionAt, closeSession, setSessionMode, setActive,
       openPane, addPane, removePane, closePane, paneIdsFor, visiblePanesFor,
       notifyEnabled, soundEnabled, setNotifyEnabled, setSoundEnabled,
     }}>

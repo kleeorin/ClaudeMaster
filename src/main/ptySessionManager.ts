@@ -3,7 +3,7 @@ import * as pty from 'node-pty'
 import { homedir } from 'os'
 import crypto from 'crypto'
 import type {
-  RemoteConfig, SessionInfo, SessionState, PermissionDecision,
+  RemoteConfig, SessionInfo, SessionState, PermissionDecision, PermissionMode, SetModeResult,
 } from '../shared/types'
 import { parseTarget } from './remotePath'
 import * as ssh from './ssh'
@@ -36,10 +36,13 @@ const TAIL_MAX = 2000
 // app-control MCP server + notebook funnel are added when available so the notebook
 // tools work here too (same flags the native engine uses; no --strict-mcp-config so
 // the user's own MCP servers keep working).
-function claudeTuiArgs(resume: boolean, mcpConfig?: string, agent: Agent = getAgent(), model = agent.model, systemPrompt = agent.systemPrompt): string[] {
+function claudeTuiArgs(resume: boolean, mcpConfig?: string, agent: Agent = getAgent(), model = agent.model, systemPrompt = agent.systemPrompt, permissionMode?: PermissionMode): string[] {
   const args = resume ? ['--continue'] : []
   if (mcpConfig) args.push('--mcp-config', mcpConfig)
   if (model) args.push('--model', model)
+  // Mode is a launch flag here too; the interactive TUI's own Shift-Tab can still
+  // change it afterwards. 'default' is the CLI default, so only pass a real override.
+  if (permissionMode && permissionMode !== 'default') args.push('--permission-mode', permissionMode)
   // The agent's role config works identically in interactive mode (all launch args).
   if (systemPrompt) args.push('--append-system-prompt', systemPrompt)
   if (agent.allowedTools?.length) args.push('--allowedTools', agent.allowedTools.join(','))
@@ -92,10 +95,11 @@ export class PtySessionManager extends EventEmitter implements SessionBackend {
     _claudeSessionId?: string,   // unused in TUI mode (--continue, not resume-by-id)
     agentId?: string,
     model?: string,
+    permissionMode?: PermissionMode,
   ): string {
     const id = crypto.randomUUID()
     const session: Session = {
-      id, name, cwd, rootDir, parentId, remoteId: remote?.id, agentId, model,
+      id, name, cwd, rootDir, parentId, remoteId: remote?.id, agentId, model, permissionMode,
       state: 'idle', pty: null, startedAt: 0, remote, resume,
     }
     this.sessions.set(id, session)
@@ -108,7 +112,7 @@ export class PtySessionManager extends EventEmitter implements SessionBackend {
     const agent = getAgent(session.agentId)
     const systemPrompt = [agent.systemPrompt, session.parentId ? SUBSESSION_REPORT_INSTRUCTION : undefined]
       .filter(Boolean).join('\n\n') || undefined
-    const args = claudeTuiArgs(resume, this.opts.mcpConfig?.(id, remote), agent, session.model ?? agent.model, systemPrompt)
+    const args = claudeTuiArgs(resume, this.opts.mcpConfig?.(id, remote), agent, session.model ?? agent.model, systemPrompt, session.permissionMode)
 
     // Remote gets the app-control MCP server reverse-tunnelled in (same port on
     // both ends) so remote claude can reach it at 127.0.0.1:<port>.
@@ -196,9 +200,19 @@ export class PtySessionManager extends EventEmitter implements SessionBackend {
   }
 
   list(): SessionInfo[] {
-    return Array.from(this.sessions.values()).map(({ id, name, cwd, rootDir, parentId, remoteId, agentId, model, state }) => ({
-      id, name, cwd, rootDir, parentId, remoteId, agentId, model, state,
+    return Array.from(this.sessions.values()).map(({ id, name, cwd, rootDir, parentId, remoteId, agentId, model, permissionMode, state }) => ({
+      id, name, cwd, rootDir, parentId, remoteId, agentId, model, permissionMode, state,
     }))
+  }
+
+  // No stream-json control channel in the pty, so mode is a launch flag only:
+  // store it and report 'restart' (a relaunch re-applies it). The user can also
+  // change mode live inside claude's own TUI via Shift-Tab.
+  async setPermissionMode(id: string, mode: PermissionMode): Promise<SetModeResult> {
+    const session = this.sessions.get(id)
+    if (!session) return { applied: 'error', error: 'no such session' }
+    session.permissionMode = mode
+    return { applied: 'restart', mode, reason: 'interactive TUI applies mode on launch' }
   }
 
   // --- SessionBackend stubs (native stream-json I/O lives in SessionManager) ----

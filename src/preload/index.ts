@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta } from '../shared/types'
+import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta, EffectivePermissions, PermissionMode, PermissionScope, PermissionAction, SetModeResult, SshConfigHost } from '../shared/types'
 
 // The whole-app frontend, handed over synchronously by main via additionalArguments
 // so the renderer can pick its chat surface (ChatView vs TerminalView) on first
@@ -17,6 +17,20 @@ contextBridge.exposeInMainWorld('api', {
     list: (): Promise<Array<{ id: string; name: string }>> =>
       ipcRenderer.invoke('models:list'),
   },
+  perms: {
+    // The effective permission picture from Claude's own settings files for a
+    // session's cwd + agent role.
+    get: (cwd: string, agentId?: string): Promise<EffectivePermissions> =>
+      ipcRenderer.invoke('perms:get', cwd, agentId),
+    // Set a session's permission mode (live if supported, else on next launch).
+    setMode: (sessionId: string, mode: PermissionMode): Promise<SetModeResult> =>
+      ipcRenderer.invoke('perms:setMode', sessionId, mode),
+    // Add / remove an allow|deny|ask rule in the chosen settings file.
+    addRule: (cwd: string, scope: PermissionScope, action: PermissionAction, value: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('perms:addRule', cwd, scope, action, value),
+    removeRule: (cwd: string, scope: PermissionScope, action: PermissionAction, value: string): Promise<WriteResult> =>
+      ipcRenderer.invoke('perms:removeRule', cwd, scope, action, value),
+  },
   settings: {
     getFrontend: (): Promise<'native' | 'tui'> =>
       ipcRenderer.invoke('settings:getFrontend'),
@@ -25,8 +39,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('settings:setFrontend', f),
   },
   session: {
-    create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string): Promise<string> =>
-      ipcRenderer.invoke('session:create', name, cwd, rootDir, parentId, resume, claudeSessionId, agentId, model),
+    create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string, permissionMode?: PermissionMode): Promise<string> =>
+      ipcRenderer.invoke('session:create', name, cwd, rootDir, parentId, resume, claudeSessionId, agentId, model, permissionMode),
     destroy: (id: string): Promise<void> =>
       ipcRenderer.invoke('session:destroy', id),
     relaunch: (id: string): Promise<boolean> =>
@@ -83,6 +97,9 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('remotes:test', remote),
     homeDir: (remote: RemoteConfig): Promise<string> =>
       ipcRenderer.invoke('remotes:homeDir', remote),
+    // ~/.ssh/config Host aliases, for one-click quick-add.
+    sshConfigHosts: (): Promise<SshConfigHost[]> =>
+      ipcRenderer.invoke('remotes:sshConfigHosts'),
   },
   pane: {
     create: (cwd: string): Promise<string> =>
@@ -127,6 +144,14 @@ contextBridge.exposeInMainWorld('api', {
     unwatch: (path: string): void => ipcRenderer.send('fs:unwatch', path),
     // Resolve the absolute path of a dropped File (for drag-in from the OS).
     pathForFile: (file: File): string => webUtils.getPathForFile(file),
+  },
+  docs: {
+    // Resolve a `[[wikilink]]` target to an existing .md path (or null).
+    resolve: (rootDir: string, fromPath: string, target: string): Promise<string | null> =>
+      ipcRenderer.invoke('docs:resolve', rootDir, fromPath, target),
+    // Create docs/<slug>.md for a missing target and return its path.
+    create: (rootDir: string, target: string): Promise<{ ok: true; path: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke('docs:create', rootDir, target),
   },
   shell: {
     openPath: (path: string): Promise<string> =>

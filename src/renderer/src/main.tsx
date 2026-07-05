@@ -8,6 +8,7 @@ import { ChatProvider } from './store/chat'
 import { NotebookProvider } from './store/notebooks'
 import { FileBrowserProvider } from './store/fileBrowser'
 import { GitPanelProvider } from './store/gitPanel'
+import { PermsPanelProvider } from './store/permsPanel'
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -39,12 +40,14 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <NotebookProvider>
         <FileBrowserProvider>
           <GitPanelProvider>
-            <SessionProvider>
-              <ChatProvider>
-                <AppControlBridge />
-                <App />
-              </ChatProvider>
-            </SessionProvider>
+            <PermsPanelProvider>
+              <SessionProvider>
+                <ChatProvider>
+                  <AppControlBridge />
+                  <App />
+                </ChatProvider>
+              </SessionProvider>
+            </PermsPanelProvider>
           </GitPanelProvider>
         </FileBrowserProvider>
       </NotebookProvider>

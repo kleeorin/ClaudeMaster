@@ -16,9 +16,12 @@ import { JupyterManager } from './jupyterManager'
 import * as gitManager from './gitManager'
 import { saveState, loadState } from './sessionPersistence'
 import * as remotes from './remotes'
+import * as sshConfig from './sshConfig'
 import * as remoteFs from './remoteFs'
+import * as docsIndex from './docsIndex'
+import * as permissions from './permissions'
 import { parseTarget } from './remotePath'
-import type { RemoteConfig, SavedSession } from '../shared/types'
+import type { RemoteConfig, SavedSession, PermissionMode, PermissionScope, PermissionAction } from '../shared/types'
 
 // App-control MCP server: each session's claude gets a per-session URL so it can
 // drive ClaudeMaster (open files/panes, edit cells, spawn subsessions, …). Remote
@@ -138,8 +141,8 @@ async function remoteFor(encodedPath: string): Promise<RemoteConfig | undefined>
   return (await remotes.get(remoteId)) ?? undefined
 }
 
-ipcMain.handle('session:create', async (_, name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string) =>
-  sessions.create(name, cwd, rootDir ?? cwd, parentId, resume, await remoteFor(cwd), claudeSessionId, agentId, model)
+ipcMain.handle('session:create', async (_, name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string, permissionMode?: PermissionMode) =>
+  sessions.create(name, cwd, rootDir ?? cwd, parentId, resume, await remoteFor(cwd), claudeSessionId, agentId, model, permissionMode)
 )
 ipcMain.handle('session:destroy', (_, id: string) => { appMcp.release(id); sessions.destroy(id) })
 ipcMain.handle('session:relaunch', (_, id: string) => sessions.relaunch(id))
@@ -180,6 +183,15 @@ ipcMain.handle('settings:setFrontend', (_, f: Frontend) => { setFrontend(f) })
 ipcMain.handle('agents:list', () => listAgents())
 // The models the picker offers (for the sidebar model picker).
 ipcMain.handle('models:list', () => listModels())
+
+// Permission Control Center: merge Claude's own settings files for a session's
+// cwd + agent into an effective permission picture (P1, read-only)…
+ipcMain.handle('perms:get', (_, cwd: string, agentId?: string) => permissions.getEffective(cwd, agentId))
+// …set a session's mode, live if supported else on next launch (P2)…
+ipcMain.handle('perms:setMode', (_, sessionId: string, mode: PermissionMode) => sessions.setPermissionMode(sessionId, mode))
+// …and add/remove allow/deny/ask rules in the chosen settings file (P3).
+ipcMain.handle('perms:addRule', (_, cwd: string, scope: PermissionScope, action: PermissionAction, value: string) => permissions.addRule(cwd, scope, action, value))
+ipcMain.handle('perms:removeRule', (_, cwd: string, scope: PermissionScope, action: PermissionAction, value: string) => permissions.removeRule(cwd, scope, action, value))
 
 // --- App-control MCP tools ---------------------------------------------------
 // The renderer publishes the active pane; tools that mutate the UI round-trip
@@ -432,6 +444,8 @@ ipcMain.handle('remotes:update', (_, remote: RemoteConfig) => remotes.update(rem
 ipcMain.handle('remotes:remove', (_, id: string) => remotes.remove(id))
 ipcMain.handle('remotes:test', (_, remote: RemoteConfig) => remotes.test(remote))
 ipcMain.handle('remotes:homeDir', (_, remote: RemoteConfig) => remotes.homeDir(remote))
+// Top-level Host aliases from ~/.ssh/config, for one-click quick-add in the picker.
+ipcMain.handle('remotes:sshConfigHosts', () => sshConfig.listHosts())
 
 ipcMain.handle('pane:create', async (_, cwd: string) => panes.create(cwd, await remoteFor(cwd)))
 ipcMain.handle('pane:destroy', (_, id: string) => panes.destroy(id))
@@ -658,6 +672,16 @@ ipcMain.handle('fs:writeFile', async (_, path: string, content: string): Promise
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 })
+
+// --- Docs / knowledge layer (wikilink resolve + create) ---------------------
+// rootDir may be a remote:// path; remoteFor picks the host (memory root is
+// local-only, handled inside docsIndex).
+ipcMain.handle('docs:resolve', async (_, rootDir: string, fromPath: string, target: string): Promise<string | null> =>
+  docsIndex.resolveDoc(rootDir, fromPath, target, await remoteFor(rootDir))
+)
+ipcMain.handle('docs:create', async (_, rootDir: string, target: string) =>
+  docsIndex.createDoc(rootDir, target, await remoteFor(rootDir))
+)
 
 // One Jupyter server per host: the local one, plus a lazily-created tunneled
 // server per remote. `dir` is the notebook's (possibly remote-encoded) directory,

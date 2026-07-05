@@ -1,16 +1,19 @@
 import { useSessions } from '../store/sessions'
 import { useFileBrowser } from '../store/fileBrowser'
 import { useGitPanel } from '../store/gitPanel'
+import { usePermsPanel } from '../store/permsPanel'
 
 export function Toolbar() {
   const { sessions, activeId, openPane, closePane, visiblePanesFor, paneIdsFor } = useSessions()
   const { browsers, openBrowser, closeBrowser } = useFileBrowser()
   const { open: gitOpen, openGit, closeGit } = useGitPanel()
+  const { open: permsOpen, openPerms, closePerms } = usePermsPanel()
 
   const paneVisible = !!(activeId && visiblePanesFor(activeId).length)
   const paneExists = !!(activeId && paneIdsFor(activeId).length)
   const browserOpen = activeId ? (browsers[activeId]?.open ?? false) : false
   const gitPanelOpen = activeId ? (gitOpen[activeId] ?? false) : false
+  const permsPanelOpen = activeId ? (permsOpen[activeId] ?? false) : false
 
   const handleTogglePane = async () => {
     if (!activeId) return
@@ -31,6 +34,12 @@ export function Toolbar() {
     if (!activeId) return
     if (gitPanelOpen) closeGit(activeId)
     else openGit(activeId)
+  }
+
+  const handleTogglePerms = () => {
+    if (!activeId) return
+    if (permsPanelOpen) closePerms(activeId)
+    else openPerms(activeId)
   }
 
   return (
@@ -55,6 +64,13 @@ export function Toolbar() {
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="9" r="2.5" />
           <path d="M6 8.5v7M18 11.5a6 6 0 0 1-6 6H8" />
+        </svg>
+      </ToolbarButton>
+
+      <ToolbarButton onClick={handleTogglePerms} disabled={!activeId} active={permsPanelOpen} title={permsPanelOpen ? 'Close Permissions' : 'Open Permissions'}>
+        {/* shield icon */}
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" />
         </svg>
       </ToolbarButton>
     </div>

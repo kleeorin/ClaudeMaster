@@ -12,6 +12,7 @@ export interface SessionInfo {
   remoteId?: string  // set when the session runs on a remote host (see RemoteConfig)
   agentId?: string   // the role this session runs as (see main/agents.ts); undefined = 'general'
   model?: string     // per-session model override; undefined = the role's model, else account default
+  permissionMode?: PermissionMode  // --permission-mode; undefined/'default' = ordinary prompting
   state: SessionState
   exitError?: string // last output when state === 'exited' (why it failed to start)
 }
@@ -26,6 +27,7 @@ export interface SavedSession {
   remoteId?: string      // remote host this session runs on (local when absent)
   agentId?: string       // the role this session runs as (re-applied on restore)
   model?: string         // per-session model override (re-applied on restore)
+  permissionMode?: PermissionMode  // per-session mode (re-applied on restore)
   claudeSessionId?: string // claude's own --session-id, for --resume on restore
 }
 
@@ -56,6 +58,62 @@ export type PermissionDecision =
   | { behavior: 'allow'; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] }
   | { behavior: 'deny'; message?: string }
 
+// --- Permission Control Center (see HANDOVER-permissions.md) ------------------
+// A session's permission mode — Claude's `--permission-mode` launch flag and the
+// `defaultMode` key in its settings files.
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+
+// Which of Claude's settings files a rule/mode comes from. Precedence low→high:
+// user < project < local. (Enterprise policy is out of scope for v1.)
+export type PermissionScope = 'user' | 'project' | 'local'
+
+export type PermissionAction = 'allow' | 'deny' | 'ask'
+
+// One allow/deny/ask entry (e.g. "Bash(npm run test:*)"), tagged with the file it
+// came from so the UI can group + attribute it.
+export interface PermissionRule {
+  action: PermissionAction
+  value: string
+  scope: PermissionScope
+}
+
+// One of Claude's three settings files, as located for a session.
+export interface PermissionFile {
+  scope: PermissionScope
+  path: string        // absolute (remote-encoded for remote sessions)
+  exists: boolean
+  unreadable?: boolean  // present but not valid JSON
+}
+
+// The merged permission picture for a session, read from Claude's OWN settings
+// files — read-only visibility (P1). `mode` is the effective defaultMode (the
+// highest-precedence file that sets one); the per-session launch override is P2.
+export interface EffectivePermissions {
+  cwd: string
+  mode: PermissionMode          // effective defaultMode across the files ('default' if none set)
+  modeScope?: PermissionScope   // which file set it (absent when defaulted)
+  rules: PermissionRule[]       // every allow/deny/ask entry, tagged by scope
+  files: PermissionFile[]       // the three settings files + whether each exists
+  notebookFunnel: string[]      // read-only "system" denies (NOTEBOOK_DENY)
+  agent?: {                     // read-only agent tool scoping, surfaced for clarity
+    id: string
+    name: string
+    allowedTools?: string[]
+    disallowedTools?: string[]
+  }
+  error?: string
+}
+
+// Outcome of a perms:setMode request. `live` = switched in the running session via
+// the control protocol; `relaunched` = the session's engine was restarted (resume-
+// preserving) to apply the flag now; `restart` = stored, applies on the next launch
+// (TUI, or a busy session we didn't interrupt); `error` = couldn't apply.
+export type SetModeResult =
+  | { applied: 'live'; mode: PermissionMode }
+  | { applied: 'relaunched'; mode: PermissionMode }
+  | { applied: 'restart'; mode: PermissionMode; reason?: string }
+  | { applied: 'error'; error: string }
+
 // A resumable past conversation, for the native /resume picker (see conversations.ts).
 export interface ConversationMeta {
   id: string          // claude session id (= transcript filename)
@@ -76,6 +134,15 @@ export interface RemoteConfig {
   host: string
   defaultDir: string
   sshOptions?: string[]
+}
+
+// A top-level `Host` alias discovered in ~/.ssh/config, offered as a one-click
+// quick-add in the remote picker. hostName/user are shown for context only — ssh
+// resolves the real connection details from the config itself.
+export interface SshConfigHost {
+  alias: string
+  hostName?: string
+  user?: string
 }
 
 // cwd/rootDir strings for remote sessions are encoded as `remote://<id>/<abs>`

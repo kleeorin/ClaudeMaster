@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
-import type { ClaudeEvent, PermissionRequest, PermissionDecision } from '../shared/types'
+import type { ClaudeEvent, PermissionRequest, PermissionDecision, PermissionMode } from '../shared/types'
 
 // One running `claude` process, driven over the bidirectional stream-json
 // protocol (see PROTOCOL-stream-json.md, pinned against CLI 2.1.198). Replaces
@@ -20,6 +20,7 @@ export function claudeArgs(opts: {
   resume?: boolean
   mcpConfig?: string   // JSON string (or path) for --mcp-config; adds the app-control server
   model?: string
+  permissionMode?: PermissionMode  // --permission-mode; omitted for 'default' (ordinary prompting)
   // --- agent/role config (see agents.ts) ---
   appendSystemPrompt?: string  // the agent's persistent charter → --append-system-prompt
   allowedTools?: string[]      // agent tool whitelist → --allowedTools
@@ -42,6 +43,8 @@ export function claudeArgs(opts: {
   // configured MCP servers keep working alongside it.
   if (opts.mcpConfig) a.push('--mcp-config', opts.mcpConfig)
   if (opts.model) a.push('--model', opts.model)
+  // 'default' is the CLI's own default, so only pass the flag for a real override.
+  if (opts.permissionMode && opts.permissionMode !== 'default') a.push('--permission-mode', opts.permissionMode)
   // The agent's charter rides as an appended system prompt so the role persists
   // for the WHOLE session, not just the seeded first turn.
   if (opts.appendSystemPrompt) a.push('--append-system-prompt', opts.appendSystemPrompt)
@@ -108,6 +111,9 @@ export class ClaudeEngine extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null
   private stdoutBuf = ''
   private pending = new Map<string, PendingPermission>()
+  // Resolvers for control_requests WE send (interrupt/set_permission_mode/…),
+  // keyed by request_id; settled when the matching control_response arrives.
+  private pendingControl = new Map<string, (r: { ok: true } | { ok: false; error: string }) => void>()
   private nextControlId = 1
   private _state: 'idle' | 'running' | 'waiting' = 'idle'
   private _turnActive = false
@@ -135,6 +141,9 @@ export class ClaudeEngine extends EventEmitter {
       // Fail any in-flight permission prompts so the renderer doesn't hang.
       for (const { resolve } of this.pending.values()) resolve({ behavior: 'deny', message: 'session ended' })
       this.pending.clear()
+      // Settle any in-flight control requests we sent (e.g. set_permission_mode).
+      for (const settle of this.pendingControl.values()) settle({ ok: false, error: 'session ended' })
+      this.pendingControl.clear()
       this.setState('idle')
       this.emit('exit', code)
     })
@@ -152,6 +161,27 @@ export class ClaudeEngine extends EventEmitter {
   interrupt(): void {
     if (!this.child) return
     this.write({ type: 'control_request', request_id: this.controlId(), request: { subtype: 'interrupt' } })
+  }
+
+  // Live mid-session permission-mode switch (the SDK's onSetPermissionMode path;
+  // the TUI's Shift-Tab equivalent). Resolves ok:true if the CLI accepts it, or
+  // ok:false with the CLI's error (e.g. the callback isn't registered in this
+  // context) so the caller can fall back to "applies on restart". Resolves
+  // ok:false immediately if the process is gone or never answers.
+  setPermissionMode(mode: PermissionMode): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (!this.child) return Promise.resolve({ ok: false, error: 'session not running' })
+    const requestId = `set-mode-${this.controlId()}`
+    return new Promise((resolve) => {
+      const done = (r: { ok: true } | { ok: false; error: string }): void => {
+        if (!this.pendingControl.has(requestId)) return
+        this.pendingControl.delete(requestId)
+        clearTimeout(timer)
+        resolve(r)
+      }
+      const timer = setTimeout(() => done({ ok: false, error: 'timed out waiting for CLI' }), 2000)
+      this.pendingControl.set(requestId, done)
+      this.write({ type: 'control_request', request_id: requestId, request: { subtype: 'set_permission_mode', mode } })
+    })
   }
 
   // Answer a can_use_tool prompt. `requestId` echoes the CLI's request_id.
@@ -203,8 +233,19 @@ export class ClaudeEngine extends EventEmitter {
       this.handlePermission(o)
       return
     }
-    // control_response (e.g. to our initialize/interrupt) — nothing to render.
-    if (type === 'control_response') return
+    // control_response to a control_request WE sent (interrupt / set_permission_mode
+    // / …). Match by request_id and settle its resolver; nothing to render.
+    if (type === 'control_response') {
+      const resp = o.response as Record<string, unknown> | undefined
+      const rid = resp?.request_id as string | undefined
+      const settle = rid ? this.pendingControl.get(rid) : undefined
+      if (settle) {
+        settle(resp?.subtype === 'error'
+          ? { ok: false, error: (resp.error as string) ?? 'request failed' }
+          : { ok: true })
+      }
+      return
+    }
 
     // Everything else is transcript material; forward verbatim + typed.
     this.emit('event', o as unknown as ClaudeEvent)

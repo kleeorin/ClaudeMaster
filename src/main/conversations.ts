@@ -9,8 +9,15 @@ import type { ConversationMeta, ClaudeEvent } from '../shared/types'
 // /home/kleeorin/Work/Projects/ClaudeMaster → -home-kleeorin-Work-Projects-ClaudeMaster).
 // This backs the native /resume picker — the launch-time flow the headless
 // stream-json channel can't express.
-function projectDir(cwd: string): string {
+export function projectDir(cwd: string): string {
   return join(homedir(), '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+}
+
+// The per-project memory dir (MEMORY.md + memory/*.md) the docs layer surfaces as
+// a knowledge-base root. Same encoding as the transcript dir; local only (memory
+// lives on the machine running the app, even for remote sessions).
+export function memoryDir(cwd: string): string {
+  return join(projectDir(cwd), 'memory')
 }
 
 // Text of a message's content (string, or the text blocks of an array).

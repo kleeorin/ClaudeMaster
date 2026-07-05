@@ -12,11 +12,18 @@ import { FileBrowserView } from './components/FileBrowserView'
 import { NotebookBrowserView } from './components/NotebookBrowserView'
 import { GitPanelView } from './components/GitPanelView'
 import { useGitPanel } from './store/gitPanel'
+import { PermissionsPanel } from './components/PermissionsPanel'
+import { usePermsPanel } from './store/permsPanel'
 import { useResizable, ResizeHandle } from './hooks/useResizable'
 
 const NotebookView = lazy(() => import('./components/NotebookView').then(m => ({ default: m.NotebookView })))
 const FileView = lazy(() => import('./components/FileView').then(m => ({ default: m.FileView })))
 const VirtualFileView = lazy(() => import('./components/VirtualFileView').then(m => ({ default: m.VirtualFileView })))
+const DocView = lazy(() => import('./components/DocView').then(m => ({ default: m.DocView })))
+
+// Markdown files open in the rich DocView (preview/source/split + wikilinks)
+// instead of the plain code editor.
+const isDoc = (path: string): boolean => /\.(md|markdown)$/i.test(path)
 
 // The most informative bit of a failed session's output is usually its last
 // non-empty line (e.g. "bash: claude: command not found").
@@ -35,13 +42,16 @@ export function App() {
   const { browsers, openFile, closeFile, setActiveTab, setFileDirty } = useFileBrowser()
   const { open: gitOpen } = useGitPanel()
   const gitPanelOpen = activeId ? (gitOpen[activeId] ?? false) : false
+  const { open: permsOpen } = usePermsPanel()
+  const permsPanelOpen = activeId ? (permsOpen[activeId] ?? false) : false
   const browser = activeId ? browsers[activeId] : undefined
   const browserOpen = browser?.open ?? false
   const openFiles = browser?.openFiles ?? []
   const dirtyFiles = browser?.dirtyFiles ?? []
   const activeTab = browser?.activeTab ?? CLAUDE_TAB
   const claudeActive = activeTab === CLAUDE_TAB
-  const activeCwd = activeId ? sessions.find((s) => s.id === activeId)?.rootDir ?? '' : ''
+  const activeSession = activeId ? sessions.find((s) => s.id === activeId) : undefined
+  const activeCwd = activeSession?.rootDir ?? ''
   const [rightTab, setRightTab] = useState<'files' | 'notebooks'>('files')
   // Side-by-side layout: the active file/notebook sits to the right of Claude
   // instead of replacing it. Only meaningful while a file tab (not Claude) is active.
@@ -68,6 +78,10 @@ export function App() {
   const gitPanel = useResizable({
     storageKey: 'cm.gitPanelW',
     initial: 340, min: 240, max: () => Math.round(window.innerWidth * 0.7), edge: 'left',
+  })
+  const permsPanel = useResizable({
+    storageKey: 'cm.permsPanelW',
+    initial: 340, min: 260, max: () => Math.round(window.innerWidth * 0.7), edge: 'left',
   })
   // Width of the Claude pane when in side-by-side mode (the file pane takes the rest).
   const claudePane = useResizable({
@@ -168,7 +182,7 @@ export function App() {
                   </div>
 
                   {splitActive && <ResizeHandle axis="x" {...claudePane.handleProps} />}
-                  {stripActive && <ResizeHandle axis="y" {...claudeStrip.handleProps} />}
+                  {stripActive && <ResizeHandle axis="y" className="border-t border-ctp-surface2" {...claudeStrip.handleProps} />}
 
                   {/* File/notebook pane: full-width when a file tab is active (and not split),
                       the right column in split mode, the top region above the Claude strip in
@@ -189,6 +203,13 @@ export function App() {
                                 />
                               ) : f.isNotebook ? (
                                 <NotebookView path={f.path} onDirtyChange={(d) => setFileDirty(s.id, f.path, d)} />
+                              ) : isDoc(f.path) ? (
+                                <DocView
+                                  path={f.path}
+                                  rootDir={s.rootDir}
+                                  onDirtyChange={(d) => setFileDirty(s.id, f.path, d)}
+                                  onOpenDoc={(p) => openFile(s.id, p, false)}
+                                />
                               ) : (
                                 <FileView path={f.path} onDirtyChange={(d) => setFileDirty(s.id, f.path, d)} />
                               )}
@@ -264,6 +285,15 @@ export function App() {
               <ResizeHandle axis="x" {...gitPanel.handleProps} />
               <div className="shrink-0" style={{ width: gitPanel.size }}>
                 <GitPanelView sessionId={activeId} cwd={activeCwd} />
+              </div>
+            </>
+          )}
+
+          {permsPanelOpen && activeId && activeSession && (
+            <>
+              <ResizeHandle axis="x" {...permsPanel.handleProps} />
+              <div className="shrink-0" style={{ width: permsPanel.size }}>
+                <PermissionsPanel sessionId={activeId} cwd={activeSession.cwd} agentId={activeSession.agentId} sessionMode={activeSession.permissionMode} />
               </div>
             </>
           )}

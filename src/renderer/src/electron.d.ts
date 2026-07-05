@@ -1,4 +1,4 @@
-import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta } from '../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta, EffectivePermissions, PermissionMode, PermissionScope, PermissionAction, SetModeResult, SshConfigHost } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -11,12 +11,18 @@ declare global {
       models: {
         list: () => Promise<Array<{ id: string; name: string }>>
       }
+      perms: {
+        get: (cwd: string, agentId?: string) => Promise<EffectivePermissions>
+        setMode: (sessionId: string, mode: PermissionMode) => Promise<SetModeResult>
+        addRule: (cwd: string, scope: PermissionScope, action: PermissionAction, value: string) => Promise<WriteResult>
+        removeRule: (cwd: string, scope: PermissionScope, action: PermissionAction, value: string) => Promise<WriteResult>
+      }
       settings: {
         getFrontend: () => Promise<'native' | 'tui'>
         setFrontend: (f: 'native' | 'tui') => Promise<void>
       }
       session: {
-        create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string) => Promise<string>
+        create: (name: string, cwd: string, rootDir?: string, parentId?: string, resume?: boolean, claudeSessionId?: string, agentId?: string, model?: string, permissionMode?: PermissionMode) => Promise<string>
         destroy: (id: string) => Promise<void>
         relaunch: (id: string) => Promise<boolean>
         list: () => Promise<SessionInfo[]>
@@ -44,6 +50,7 @@ declare global {
         remove: (id: string) => Promise<void>
         test: (remote: RemoteConfig) => Promise<RemoteTest>
         homeDir: (remote: RemoteConfig) => Promise<string>
+        sshConfigHosts: () => Promise<SshConfigHost[]>
       }
       pane: {
         create: (cwd: string) => Promise<string>
@@ -69,6 +76,10 @@ declare global {
         watch: (path: string) => void
         unwatch: (path: string) => void
         pathForFile: (file: File) => string
+      }
+      docs: {
+        resolve: (rootDir: string, fromPath: string, target: string) => Promise<string | null>
+        create: (rootDir: string, target: string) => Promise<{ ok: true; path: string } | { ok: false; error: string }>
       }
       shell: {
         openPath: (path: string) => Promise<string>

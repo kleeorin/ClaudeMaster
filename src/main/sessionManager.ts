@@ -3,6 +3,7 @@ import { homedir } from 'os'
 import crypto from 'crypto'
 import type {
   RemoteConfig, SessionInfo, SessionState, ClaudeEvent, PermissionRequest, PermissionDecision,
+  PermissionMode, SetModeResult,
 } from '../shared/types'
 import { parseTarget } from './remotePath'
 import * as ssh from './ssh'
@@ -64,6 +65,7 @@ export interface SessionBackend extends EventEmitter {
   create(
     name: string, cwd: string, rootDir?: string, parentId?: string,
     resume?: boolean, remote?: RemoteConfig, claudeSessionId?: string, agentId?: string, model?: string,
+    permissionMode?: PermissionMode,
   ): string
   relaunch(id: string): boolean
   destroy(id: string): void
@@ -73,6 +75,9 @@ export interface SessionBackend extends EventEmitter {
   sendUserTurn(id: string, text: string): void
   interrupt(id: string): void
   respondPermission(id: string, requestId: string, decision: PermissionDecision): void
+  // Set a session's permission mode. Live if the backend/protocol supports it,
+  // else the mode is stored + a relaunch applies it (see the return contract).
+  setPermissionMode(id: string, mode: PermissionMode): Promise<SetModeResult>
   resumeInto(id: string, claudeSessionId: string): void
   restartFresh(id: string): void
   // tui (pty) I/O
@@ -100,10 +105,11 @@ export class SessionManager extends EventEmitter implements SessionBackend {
     claudeSessionId?: string,
     agentId?: string,
     model?: string,
+    permissionMode?: PermissionMode,
   ): string {
     const id = crypto.randomUUID()
     const session: Session = {
-      id, name, cwd, rootDir, parentId, remoteId: remote?.id, agentId, model,
+      id, name, cwd, rootDir, parentId, remoteId: remote?.id, agentId, model, permissionMode,
       state: 'idle', engine: null, startedAt: 0, remote, resume,
       claudeSessionId: claudeSessionId ?? crypto.randomUUID(),
       stderrTail: '',
@@ -131,6 +137,7 @@ export class SessionManager extends EventEmitter implements SessionBackend {
     const args = claudeArgs({
       sessionId: claudeSessionId, resume, mcpConfig: this.opts.mcpConfig?.(id, remote),
       model: session.model ?? agent.model,
+      permissionMode: session.permissionMode,
       appendSystemPrompt: systemPrompt,
       allowedTools: agent.allowedTools,
       disallowedTools: agent.disallowedTools,
@@ -288,6 +295,34 @@ export class SessionManager extends EventEmitter implements SessionBackend {
     this.sessions.get(id)?.engine?.respondPermission(requestId, decision)
   }
 
+  // Store the mode (so a relaunch keeps it), then apply it. Order of preference:
+  //  1. a live switch over the control protocol (instant, no restart);
+  //  2. if the CLI declines that (headless mode doesn't register the callback) and
+  //     the session is idle, restart its engine resume-preserving so the flag takes
+  //     effect now without losing the conversation;
+  //  3. otherwise (no engine, or a turn in flight we won't interrupt) leave it
+  //     stored to apply on the next launch.
+  async setPermissionMode(id: string, mode: PermissionMode): Promise<SetModeResult> {
+    const session = this.sessions.get(id)
+    if (!session) return { applied: 'error', error: 'no such session' }
+    session.permissionMode = mode
+    if (!session.engine) return { applied: 'restart', mode, reason: 'session not running' }
+
+    const r = await session.engine.setPermissionMode(mode)
+    if (r.ok) return { applied: 'live', mode }
+
+    // Live switch unavailable. Restart the engine to apply the launch flag, but
+    // only when idle — killing a running turn would be worse than waiting.
+    if (session.state === 'idle' && session.sawInit && session.claudeSessionId) {
+      session.resume = true                 // resume the same conversation on relaunch
+      session.resumeFallbackTried = false
+      session.replacing = true              // exit handler relaunches instead of closing
+      session.engine.kill()
+      return { applied: 'relaunched', mode }
+    }
+    return { applied: 'restart', mode, reason: r.error }
+  }
+
   destroy(id: string): void {
     const session = this.sessions.get(id)
     if (!session) return
@@ -301,8 +336,8 @@ export class SessionManager extends EventEmitter implements SessionBackend {
   }
 
   list(): SessionInfo[] {
-    return Array.from(this.sessions.values()).map(({ id, name, cwd, rootDir, parentId, remoteId, agentId, model, state }) => ({
-      id, name, cwd, rootDir, parentId, remoteId, agentId, model, state,
+    return Array.from(this.sessions.values()).map(({ id, name, cwd, rootDir, parentId, remoteId, agentId, model, permissionMode, state }) => ({
+      id, name, cwd, rootDir, parentId, remoteId, agentId, model, permissionMode, state,
     }))
   }
 

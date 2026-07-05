@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import type { RemoteConfig } from '../../../shared/types'
+import type { RemoteConfig, SshConfigHost } from '../../../shared/types'
 
 type Draft = Omit<RemoteConfig, 'id'> & { id?: string }
 
@@ -9,6 +9,7 @@ const EMPTY: Draft = { label: '', host: '', defaultDir: '', sshOptions: [] }
 // opener refresh its own copy of the list (e.g. the New Session menu).
 export function RemotesModal({ onClose, onChanged }: { onClose: () => void; onChanged?: () => void }) {
   const [remotes, setRemotes] = useState<RemoteConfig[]>([])
+  const [sshHosts, setSshHosts] = useState<SshConfigHost[]>([])
   const [draft, setDraft] = useState<Draft | null>(null)
   const [optsText, setOptsText] = useState('')
   const [testing, setTesting] = useState(false)
@@ -20,6 +21,18 @@ export function RemotesModal({ onClose, onChanged }: { onClose: () => void; onCh
   }, [onChanged])
 
   useEffect(() => { void refresh() }, [refresh])
+
+  // Discover ~/.ssh/config aliases once (they rarely change mid-session).
+  useEffect(() => { void window.api.remotes.sshConfigHosts().then(setSshHosts) }, [])
+
+  // Offer only aliases not already saved as a remote (matched on host).
+  const quickAddable = sshHosts.filter((h) => !remotes.some((r) => r.host === h.alias))
+
+  const quickAdd = async (h: SshConfigHost) => {
+    // ssh resolves the real destination from the config; blank defaultDir ⇒ home.
+    await window.api.remotes.add({ label: h.alias, host: h.alias, defaultDir: '', sshOptions: [] })
+    await refresh()
+  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -101,6 +114,26 @@ export function RemotesModal({ onClose, onChanged }: { onClose: () => void; onCh
               </div>
             ))}
           </div>
+
+          {!draft && quickAddable.length > 0 && (
+            <div className="space-y-1 border-t border-ctp-surface0 pt-3">
+              <div className="text-[11px] text-ctp-overlay">From your <span className="font-mono">~/.ssh/config</span> — one click to add:</div>
+              <div className="flex flex-wrap gap-1.5">
+                {quickAddable.map((h) => (
+                  <button
+                    key={h.alias}
+                    onClick={() => quickAdd(h)}
+                    title={`${h.user ? h.user + '@' : ''}${h.hostName ?? h.alias} — add as a remote`}
+                    className="flex items-center gap-1 px-2 py-1 text-[11px] rounded bg-ctp-surface0 text-ctp-subtext hover:text-ctp-text hover:bg-ctp-surface1"
+                  >
+                    <span className="text-ctp-green">+</span>
+                    <span className="font-mono">{h.alias}</span>
+                    {h.hostName && <span className="text-ctp-overlay">({h.hostName})</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {draft ? (
             <div className="space-y-2 border-t border-ctp-surface0 pt-3">
