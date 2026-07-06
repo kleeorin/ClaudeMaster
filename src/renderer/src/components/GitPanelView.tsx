@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GitStatus, GitFileStatus, GitCommit } from '../../../shared/types'
 import { useFileBrowser } from '../store/fileBrowser'
+import { useGitPanel } from '../store/gitPanel'
 
 type Mode = 'changes' | 'log'
 
@@ -79,6 +80,7 @@ export function GitPanelView({ sessionId, cwd }: Props) {
   const [newBranch, setNewBranch] = useState('')
 
   const { openVirtual } = useFileBrowser()
+  const { closeGit } = useGitPanel()
 
   const modeRef = useRef(mode)
   modeRef.current = mode
@@ -342,6 +344,11 @@ export function GitPanelView({ sessionId, cwd }: Props) {
           </span>
         )}
         <button onClick={() => { refresh(); loadLog() }} title="Refresh" className="text-ctp-overlay hover:text-ctp-text text-xs leading-none">⟳</button>
+        <button onClick={() => closeGit(sessionId)} title="Close" className="text-ctp-overlay hover:text-ctp-text p-1">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
       {/* Changes / Log tabs */}

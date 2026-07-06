@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { VirtualDoc } from '../store/fileBrowser'
-import { CodeEditor } from './CodeEditor'
+import { CodeEditor, EditorTools, type EditorHandle } from './CodeEditor'
 import { diffHighlighting } from '../lib/diffHighlight'
 
 interface Props {
@@ -22,6 +22,8 @@ export function VirtualFileView({ label, doc, onDirtyChange, onSavedAs }: Props)
   const [content, setContent] = useState(doc.content)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const editorRef = useRef<EditorHandle>(null)
+  const [wrap, setWrap] = useState(true)
   // Dirty relative to the original in-memory content — the tab shows a dot and
   // confirms on close, matching FileView.
   const dirty = content !== doc.content
@@ -63,6 +65,7 @@ export function VirtualFileView({ label, doc, onDirtyChange, onSavedAs }: Props)
           {dirty && <span className="text-ctp-yellow" title="Unsaved changes"> ●</span>}
         </span>
         {error && <span className="text-[10px] text-ctp-red shrink-0" title={error}>save failed</span>}
+        <EditorTools editor={editorRef} wrap={wrap} onToggleWrap={() => setWrap((v) => !v)} />
         <button
           onClick={saveAs}
           disabled={saving}
@@ -76,9 +79,11 @@ export function VirtualFileView({ label, doc, onDirtyChange, onSavedAs }: Props)
       {/* Body */}
       <div className="flex-1 overflow-auto min-h-0">
         <CodeEditor
+          ref={editorRef}
           initialDoc={doc.content}
           filename={doc.language ?? label}
           readOnly={false}
+          wrap={wrap}
           onChange={setContent}
           onSave={saveAs}
           extensions={isDiff ? [diffHighlighting] : undefined}

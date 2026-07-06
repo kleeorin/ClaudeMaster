@@ -39,7 +39,7 @@ const ClaudeSurface = window.api.frontend === 'tui' ? TerminalView : ChatView
 
 export function App() {
   const { sessions, activeId, paneIdsFor, visiblePanesFor, addPane, removePane, closeSession, relaunchSession } = useSessions()
-  const { browsers, openFile, closeFile, setActiveTab, setFileDirty } = useFileBrowser()
+  const { browsers, openFile, closeFile, closeBrowser, setActiveTab, setFileDirty } = useFileBrowser()
   const { open: gitOpen } = useGitPanel()
   const gitPanelOpen = activeId ? (gitOpen[activeId] ?? false) : false
   const { open: permsOpen } = usePermsPanel()
@@ -98,6 +98,22 @@ export function App() {
   const showPane = !!(activeId && claudeActive && visiblePanesFor(activeId).length)
   const anyPanes = sessions.some((s) => paneIdsFor(s.id).length > 0)
 
+  // The main-column tab strip (Claude tab + one per open file). Defined once and
+  // placed per layout: full-width at the top of the column normally, but in split
+  // mode it moves to head the editor column only, so the tabs sit above the editor
+  // rather than spanning across the Claude pane too.
+  const tabBar = activeId && openFiles.length > 0 ? (
+    <TabBar
+      openFiles={openFiles}
+      dirtyFiles={dirtyFiles}
+      activeTab={activeTab}
+      onSelect={(t) => setActiveTab(activeId, t)}
+      onClose={(p) => closeFile(activeId, p)}
+      splitView={splitView}
+      onToggleSplit={toggleSplit}
+    />
+  ) : null
+
   return (
     <div className="flex h-screen overflow-hidden bg-ctp-base text-ctp-text">
       <ContextMenu />
@@ -115,17 +131,9 @@ export function App() {
               shown/hidden via CSS so their state (scrollback, unsaved edits)
               survives tab and session switches. */}
           <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-            {activeId && openFiles.length > 0 && (
-              <TabBar
-                openFiles={openFiles}
-                dirtyFiles={dirtyFiles}
-                activeTab={activeTab}
-                onSelect={(t) => setActiveTab(activeId, t)}
-                onClose={(p) => closeFile(activeId, p)}
-                splitView={splitView}
-                onToggleSplit={toggleSplit}
-              />
-            )}
+            {/* Normally the tabs head the whole column; in split mode they move
+                down into the editor column (below), so hide them here. */}
+            {!splitActive && tabBar}
 
             <div className={`flex-1 flex overflow-hidden min-h-0 ${stripActive ? 'flex-col' : ''}`}>
               {sessions.length === 0 ? (
@@ -186,8 +194,11 @@ export function App() {
 
                   {/* File/notebook pane: full-width when a file tab is active (and not split),
                       the right column in split mode, the top region above the Claude strip in
-                      strip mode. Hidden on the Claude tab. */}
-                  <div className={`relative overflow-hidden flex-1 min-w-0 ${claudeActive ? 'hidden' : ''} ${stripActive ? 'order-first' : ''}`}>
+                      strip mode. Hidden on the Claude tab. In split mode it carries its own
+                      tab strip up top (so the tabs head the editor, not the whole column). */}
+                  <div className={`overflow-hidden flex-1 min-w-0 flex flex-col ${claudeActive ? 'hidden' : ''} ${stripActive ? 'order-first' : ''}`}>
+                    {splitActive && tabBar}
+                    <div className="relative flex-1 min-h-0 overflow-hidden">
                     {sessions.map((s) =>
                       (browsers[s.id]?.openFiles ?? []).map((f) => {
                         const visible = s.id === activeId && browsers[s.id]?.activeTab === f.path
@@ -211,13 +222,18 @@ export function App() {
                                   onOpenDoc={(p) => openFile(s.id, p, false)}
                                 />
                               ) : (
-                                <FileView path={f.path} onDirtyChange={(d) => setFileDirty(s.id, f.path, d)} />
+                                <FileView
+                                  path={f.path}
+                                  onDirtyChange={(d) => setFileDirty(s.id, f.path, d)}
+                                  onSavedAs={(real) => openFile(s.id, real, false)}
+                                />
                               )}
                             </Suspense>
                           </div>
                         )
                       })
                     )}
+                    </div>
                   </div>
                 </>
               )}
@@ -268,6 +284,16 @@ export function App() {
                 <div className="h-7 shrink-0 flex items-stretch bg-ctp-mantle border-b border-ctp-surface0 text-[11px]">
                   <PanelTab label="Files" active={rightTab === 'files'} onClick={() => setRightTab('files')} />
                   <PanelTab label="Notebooks" active={rightTab === 'notebooks'} onClick={() => setRightTab('notebooks')} />
+                  <div className="flex-1" />
+                  <button
+                    onClick={() => closeBrowser(activeId)}
+                    title="Close file browser"
+                    className="flex items-center px-2 text-ctp-overlay hover:text-ctp-text"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M18 6 6 18M6 6l12 12" />
+                    </svg>
+                  </button>
                 </div>
                 <div className="flex-1 min-h-0">
                   {rightTab === 'files' ? (

@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FilePreview as Preview } from '../../../shared/types'
-import { CodeEditor } from './CodeEditor'
+import { CodeEditor, EditorTools, type EditorHandle } from './CodeEditor'
 import { onFileTouched } from '../lib/fileEvents'
 
 interface Props {
@@ -8,6 +8,9 @@ interface Props {
   // Reports unsaved-edit state up so the tab can show a dirty dot and confirm on
   // close. Optional so the component still works standalone.
   onDirtyChange?: (dirty: boolean) => void
+  // Called with the chosen path after a successful "Save as…", so the host can
+  // open the new file in a tab (the original stays open, untouched).
+  onSavedAs?: (path: string) => void
 }
 
 // File opened as a tab in the main column (non-notebook). Mirrors NotebookView's
@@ -15,8 +18,10 @@ interface Props {
 // highlighted editor; images preview inline; binaries fall back to the OS app.
 // Renders inside the Electron window (via IPC), so it travels over VNC for
 // remote launches — no external viewer / window manager required.
-export function FileView({ path, onDirtyChange }: Props) {
+export function FileView({ path, onDirtyChange, onSavedAs }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
+  const editorRef = useRef<EditorHandle>(null)
+  const [wrap, setWrap] = useState(true)
 
   // Load (and reload on path change) from disk, mirroring how NotebookView is
   // driven purely by its `path`.
@@ -69,6 +74,20 @@ export function FileView({ path, onDirtyChange }: Props) {
     setSaving(false)
     if (res.ok) { setSavedContent(content); setConflict(false) }
     else setError(res.error)
+  }
+
+  // Write the current text to a newly chosen path and hand it to the host to open.
+  // The original file/tab is left as-is (this is a copy, not a rename).
+  const saveAs = async () => {
+    if (!editable || saving) return
+    const target = await window.api.dialog.saveFile(name)
+    if (!target) return
+    setSaving(true)
+    setError(null)
+    const res = await window.api.fs.writeFile(target, content)
+    setSaving(false)
+    if (!res.ok) { setError(res.error); return }
+    onSavedAs?.(target)
   }
 
   // Reload text from disk into the editor (discarding any in-editor edits). Used
@@ -125,15 +144,26 @@ export function FileView({ path, onDirtyChange }: Props) {
         {isText && preview.truncated && (
           <span className="text-[10px] text-ctp-yellow shrink-0">truncated · read-only</span>
         )}
+        {isText && <EditorTools editor={editorRef} wrap={wrap} onToggleWrap={() => setWrap((v) => !v)} />}
         {editable && (
-          <button
-            onClick={save}
-            disabled={!dirty || saving}
-            title="Save (Ctrl/Cmd+S)"
-            className="text-[11px] px-2 py-0.5 rounded bg-ctp-surface0 text-ctp-text hover:bg-ctp-surface1 disabled:opacity-30 disabled:cursor-not-allowed"
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
+          <>
+            <button
+              onClick={save}
+              disabled={!dirty || saving}
+              title="Save (Ctrl/Cmd+S)"
+              className="text-[11px] px-2 py-0.5 rounded bg-ctp-surface0 text-ctp-text hover:bg-ctp-surface1 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              onClick={saveAs}
+              disabled={saving}
+              title="Save a copy to a new location"
+              className="text-[11px] px-2 py-0.5 rounded bg-ctp-surface0 text-ctp-text hover:bg-ctp-surface1 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Save as…
+            </button>
+          </>
         )}
       </div>
 
@@ -168,9 +198,11 @@ export function FileView({ path, onDirtyChange }: Props) {
 
         {preview.kind === 'text' && (
           <CodeEditor
+            ref={editorRef}
             initialDoc={preview.text}
             filename={preview.name}
             readOnly={!editable}
+            wrap={wrap}
             onChange={setContent}
             onSave={save}
             externalDoc={content}
