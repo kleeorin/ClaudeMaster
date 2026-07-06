@@ -221,7 +221,17 @@ export class SessionManager extends EventEmitter implements SessionBackend {
         this.emit('stateChange', id, session.state)
         return
       }
-      const failedFast = !session.closing && Date.now() - session.startedAt < STARTUP_GRACE_MS
+      // A startup failure = the engine exited before it ever emitted system/init
+      // (e.g. `claude: not found` on a remote, ssh auth failure). Detect it by the
+      // MISSING init rather than by the 4s window: a slow box (a Raspberry Pi over
+      // ssh) can take longer than the grace to connect, probe PATH, and fail — and
+      // then the exit would be misread as a normal close and the row silently
+      // removed. Keeping !sawInit as the primary signal means "claude not found"
+      // always leaves the session in place (error + Retry, terminal/files still
+      // usable) no matter how slow the remote is. The timing check stays as a
+      // secondary catch for an init-less early death.
+      const failedFast = !session.closing
+        && (!session.sawInit || Date.now() - session.startedAt < STARTUP_GRACE_MS)
       if (failedFast) {
         session.engine = null
         session.state = 'exited'

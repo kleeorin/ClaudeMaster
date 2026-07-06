@@ -152,12 +152,19 @@ export class PtySessionManager extends EventEmitter implements SessionBackend {
       this.detect(id, data)
     })
 
-    ptyProcess.onExit(() => {
-      // A near-instant, un-asked-for exit is a startup failure (bad remote command,
-      // ssh error) — the Claude process never came up. Keep the session alive (only
-      // its terminal is gone) and tell the renderer why. A slow exit, or one from
-      // destroy(), is a real close.
-      const failedFast = !session.closing && Date.now() - session.startedAt < STARTUP_GRACE_MS
+    ptyProcess.onExit(({ exitCode }) => {
+      // An un-asked-for exit is a startup failure (bad remote command, ssh error) —
+      // the Claude process never came up. Keep the session alive (only its terminal
+      // is gone) and tell the renderer why. Detect it by a NON-ZERO exit code rather
+      // than only by the 4s window: a slow box (a Raspberry Pi over ssh) can take
+      // longer than the grace to connect, probe PATH, and fail with `claude: not
+      // found` (exit 127; ssh connect failure = 255), and that late exit would
+      // otherwise be misread as a normal close and the row silently removed. A
+      // user-ended interactive claude exits 0, so a clean finish (or a destroy())
+      // is still treated as a real close. The timing check stays as a secondary
+      // catch for an early crash that happens to exit 0.
+      const failedFast = !session.closing
+        && (exitCode !== 0 || Date.now() - session.startedAt < STARTUP_GRACE_MS)
       if (failedFast) {
         const tail = (this.outputTails.get(id) ?? '').trim()
         session.pty = null
