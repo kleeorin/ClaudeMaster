@@ -28,6 +28,7 @@ interface Props {
 export function Cell(props: Props) {
   const { cell, index, selected, onSelect, onMoveUp, onMoveDown, onToggleType, onRemove, onReorder } = props
   const editorRef = useRef<HTMLDivElement>(null)
+  const viewRef = useRef<EditorView | null>(null)
   // Latest callbacks, read inside the (once-built) CodeMirror keymap.
   const cbRef = useRef(props)
   cbRef.current = props
@@ -60,8 +61,21 @@ export function Cell(props: Props) {
       }),
       parent: editorRef.current,
     })
-    return () => view.destroy()
+    viewRef.current = view
+    return () => { view.destroy(); viewRef.current = null }
   }, [cell.id, cell.type]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Push EXTERNAL code changes (e.g. app-control edit_cell writing to the store)
+  // into the already-built editor. The editor is otherwise the source of truth —
+  // user typing flows store-ward via onCodeChange, keeping doc === cell.code — so
+  // this only fires for changes that didn't originate here, and the equality guard
+  // means it never clobbers what the user is typing.
+  useEffect(() => {
+    const view = viewRef.current
+    if (!view) return
+    if (view.state.doc.toString() === cell.code) return
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: cell.code } })
+  }, [cell.code])
 
   const label = isCode
     ? `[${cell.running ? '*' : (cell.executionCount ?? ' ')}]:`
