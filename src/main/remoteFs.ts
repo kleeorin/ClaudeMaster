@@ -119,9 +119,20 @@ export async function readText(remote: RemoteConfig, path: string): Promise<{ ok
 export async function writeFile(remote: RemoteConfig, path: string, content: string): Promise<WriteResult> {
   try {
     // $0 = the path (a positional arg), so nothing from `path` is interpreted by
-    // the remote shell. Content arrives on stdin.
-    const { stderr, code } = await ssh.run(remote, ['sh', '-c', 'cat > "$0"', path], { input: content })
+    // the remote shell. Content arrives on stdin. We echo back the resulting byte
+    // count (`wc -c`) and verify it against what we sent: streaming a file to the
+    // remote over ssh's stdin can be truncated (e.g. on a flaky/multiplexed link)
+    // while `cat` still exits 0 — a silent partial write. Without this check that
+    // false success clears the "unsaved" flag and the disk watcher then adopts the
+    // corrupt on-disk copy, destroying the in-memory edits. Failing loudly instead
+    // keeps the pane dirty so the user's work is preserved and the error is visible.
+    const { stdout, stderr, code } = await ssh.run(remote, ['sh', '-c', 'cat > "$0" && wc -c < "$0"', path], { input: content })
     if (code !== 0) return { ok: false, error: stderr.trim() || `write exited ${code}` }
+    const wrote = parseInt(stdout.trim(), 10)
+    const expected = Buffer.byteLength(content, 'utf8')
+    if (!Number.isFinite(wrote) || wrote !== expected) {
+      return { ok: false, error: `incomplete write: ${Number.isFinite(wrote) ? wrote : '?'} of ${expected} bytes reached the remote (the connection may have truncated the transfer). Your edits are NOT saved — try again.` }
+    }
     return { ok: true }
   } catch (err) { return { ok: false, error: errMsg(err) } }
 }

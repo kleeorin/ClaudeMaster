@@ -91,6 +91,13 @@ export function run(
       },
     )
     if (opts.input !== undefined) {
+      // A remote command can close its stdin early — it exited, or a redirect like
+      // `cat > "$0"` failed to open its target — while we're still streaming input.
+      // The write then rejects with EPIPE; unhandled, that surfaces as an uncaught
+      // exception that crashes the main process. Swallow it: the command's exit code
+      // and stderr carry the real outcome (and remoteFs.writeFile also verifies the
+      // byte count actually landed).
+      child.stdin?.on('error', () => {})
       child.stdin?.end(opts.input)
     }
   })

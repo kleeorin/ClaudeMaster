@@ -135,6 +135,10 @@ export class ClaudeEngine extends EventEmitter {
     // Claude's own logs/errors go to stderr; surface as diagnostic events, don't crash.
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => this.emit('event', { type: 'stderr', text: chunk } as ClaudeEvent))
+    // If the process dies while we're mid-write, the pipe errors asynchronously with
+    // EPIPE; unhandled, that's an uncaught exception that crashes the main process.
+    // Swallow it — the 'exit' handler below already deals with the process being gone.
+    child.stdin.on('error', () => {})
 
     child.on('exit', (code) => {
       this.child = null
@@ -204,7 +208,9 @@ export class ClaudeEngine extends EventEmitter {
   private controlId(): string { return `cm-${this.nextControlId++}` }
 
   private write(obj: unknown): void {
-    this.child?.stdin.write(JSON.stringify(obj) + '\n')
+    const stdin = this.child?.stdin
+    if (!stdin || stdin.destroyed) return  // process gone; the write would EPIPE
+    stdin.write(JSON.stringify(obj) + '\n')
   }
 
   private setState(s: 'idle' | 'running' | 'waiting'): void {
