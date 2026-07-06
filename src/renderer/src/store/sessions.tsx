@@ -26,6 +26,17 @@ const dutyName = (agentId: string | undefined, fallback: string): string =>
     ? agentId.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
     : fallback
 
+// Surface a session-creation failure to the user. Creating a session goes over
+// IPC to the main process (session:create → SessionManager/PtySessionManager),
+// which can throw for many reasons (ssh not on PATH, node-pty spawn-helper lost
+// its exec bit, a dead remote, …). Without this the rejected promise is swallowed
+// and the UI just silently does nothing — you pick a folder and no tab appears.
+function reportSessionError(what: string, e: unknown): void {
+  const msg = e instanceof Error ? e.message : String(e)
+  window.alert(`${what}\n\n${msg}`)
+  console.error(what, e)
+}
+
 // Flatten the live sessions into the persisted shape. Parent links survive as an
 // index into this array (ids are regenerated on restore); a subsession always
 // follows its parent, so the index is always already known on the way back in.
@@ -368,8 +379,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     if (!cwd) return
     // A typed name wins; otherwise the folder's basename is the default label.
     const finalName = name?.trim() || cwd.split('/').pop() || 'Session'
-    const id = await window.api.session.create(finalName, cwd, cwd, undefined, false, undefined, agentId, model)
-    dispatch({ type: 'ADD', session: { id, name: finalName, cwd, rootDir: cwd, agentId, model, state: 'idle' } })
+    try {
+      const id = await window.api.session.create(finalName, cwd, cwd, undefined, false, undefined, agentId, model)
+      dispatch({ type: 'ADD', session: { id, name: finalName, cwd, rootDir: cwd, agentId, model, state: 'idle' } })
+    } catch (e) {
+      reportSessionError(`Couldn't start session in ${cwd}.`, e)
+    }
   }, [])
 
   // Start a session on a remote host. `dir` is a plain absolute path on that host;
@@ -379,8 +394,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const cwd = makeRemotePath(remote.id, dir)
     // A typed name wins; otherwise the folder's basename (or the remote label).
     const finalName = name?.trim() || dir.split('/').filter(Boolean).pop() || remote.label
-    const id = await window.api.session.create(finalName, cwd, cwd, undefined, false, undefined, agentId, model)
-    dispatch({ type: 'ADD', session: { id, name: finalName, cwd, rootDir: cwd, remoteId: remote.id, agentId, model, state: 'idle' } })
+    try {
+      const id = await window.api.session.create(finalName, cwd, cwd, undefined, false, undefined, agentId, model)
+      dispatch({ type: 'ADD', session: { id, name: finalName, cwd, rootDir: cwd, remoteId: remote.id, agentId, model, state: 'idle' } })
+    } catch (e) {
+      reportSessionError(`Couldn't start a session on ${remote.label} at ${dir}.`, e)
+    }
   }, [])
 
   // A subsession runs its own Claude in the parent's directory, but scopes its
@@ -399,11 +418,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
     const rootDir = parent.remoteId ? makeRemotePath(parent.remoteId, picked) : picked
     const name = dutyName(agentId, picked.split('/').filter(Boolean).pop() || 'Subsession')
-    const id = await window.api.session.create(name, parent.cwd, rootDir, parentId, false, undefined, agentId, model)
-    dispatch({
-      type: 'ADD',
-      session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, agentId, model, state: 'idle' },
-    })
+    try {
+      const id = await window.api.session.create(name, parent.cwd, rootDir, parentId, false, undefined, agentId, model)
+      dispatch({
+        type: 'ADD',
+        session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, agentId, model, state: 'idle' },
+      })
+    } catch (e) {
+      reportSessionError(`Couldn't start a subsession in ${picked}.`, e)
+    }
   }, [])
 
   // Spawn a subsession from app-control (no dialog). Defaults to the parent's OWN
@@ -416,21 +439,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const picked = dir ?? parseTarget(parent.cwd).path  // plain path; default = same folder
     const rootDir = parent.remoteId ? makeRemotePath(parent.remoteId, picked) : picked
     const name = dutyName(agentId, picked.split('/').filter(Boolean).pop() || 'Subsession')
-    const id = await window.api.session.create(name, parent.cwd, rootDir, parentId, false, undefined, agentId, model)
-    dispatch({
-      type: 'ADD',
-      session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, agentId, model, state: 'idle' },
-    })
-    return id
+    try {
+      const id = await window.api.session.create(name, parent.cwd, rootDir, parentId, false, undefined, agentId, model)
+      dispatch({
+        type: 'ADD',
+        session: { id, name, cwd: parent.cwd, rootDir, parentId, remoteId: parent.remoteId, agentId, model, state: 'idle' },
+      })
+      return id
+    } catch (e) {
+      reportSessionError(`Couldn't spawn a subsession in ${picked}.`, e)
+      return undefined
+    }
   }, [])
 
   // Open a new top-level session in `dir` from app-control (no dialog). Local only
   // (dir is a plain absolute path); remote creation stays interactive for now.
   const createSessionAt = useCallback(async (dir: string, agentId?: string, model?: string): Promise<string | undefined> => {
     const name = dir.split('/').filter(Boolean).pop() || 'Session'
-    const id = await window.api.session.create(name, dir, dir, undefined, false, undefined, agentId, model)
-    dispatch({ type: 'ADD', session: { id, name, cwd: dir, rootDir: dir, agentId, model, state: 'idle' } })
-    return id
+    try {
+      const id = await window.api.session.create(name, dir, dir, undefined, false, undefined, agentId, model)
+      dispatch({ type: 'ADD', session: { id, name, cwd: dir, rootDir: dir, agentId, model, state: 'idle' } })
+      return id
+    } catch (e) {
+      reportSessionError(`Couldn't start a session in ${dir}.`, e)
+      return undefined
+    }
   }, [])
 
   const setSessionMode = useCallback(async (id: string, mode: PermissionMode): Promise<SetModeResult> => {

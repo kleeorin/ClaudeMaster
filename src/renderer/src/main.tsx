@@ -34,6 +34,14 @@ class ErrorBoundary extends React.Component<
   }
 }
 
+// The ErrorBoundary above only catches throws during render/lifecycle — a rejected
+// promise from an event handler (e.g. a failed session:create) escapes it entirely
+// and used to vanish as a silent "Uncaught (in promise)" only visible in DevTools.
+// Log every one so the next such failure leaves a trace even without DevTools open.
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('[unhandledrejection]', e.reason)
+})
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>

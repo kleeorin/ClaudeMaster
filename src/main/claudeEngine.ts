@@ -140,7 +140,15 @@ export class ClaudeEngine extends EventEmitter {
     // Swallow it — the 'exit' handler below already deals with the process being gone.
     child.stdin.on('error', () => {})
 
-    child.on('exit', (code) => {
+    // Both a normal exit and an async spawn failure ('error' — e.g. the command
+    // isn't on PATH, which fires 'error' and may never fire 'exit') tear the engine
+    // down the same way; `terminated` makes sure we only do it — and emit 'exit' —
+    // once even if both events arrive. Without the 'error' listener, a spawn failure
+    // would be an uncaught EventEmitter throw that crashes the whole main process.
+    let terminated = false
+    const terminate = (code: number | null): void => {
+      if (terminated) return
+      terminated = true
       this.child = null
       // Fail any in-flight permission prompts so the renderer doesn't hang.
       for (const { resolve } of this.pending.values()) resolve({ behavior: 'deny', message: 'session ended' })
@@ -150,6 +158,14 @@ export class ClaudeEngine extends EventEmitter {
       this.pendingControl.clear()
       this.setState('idle')
       this.emit('exit', code)
+    }
+
+    child.on('exit', (code) => terminate(code))
+    child.on('error', (err) => {
+      // Surface why it failed to start (this becomes the session's stderrTail, shown
+      // as "Claude not available" + Retry), then settle as a startup failure.
+      this.emit('event', { type: 'stderr', text: `failed to start: ${err.message}\n` } as ClaudeEvent)
+      terminate(null)
     })
   }
 

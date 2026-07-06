@@ -73,8 +73,13 @@ export async function readDir(remote: RemoteConfig, path: string): Promise<DirEn
     return entries.sort((a, b) =>
       a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name),
     )
-  } catch {
-    return []
+  } catch (err) {
+    // A thrown error here is a real transport failure (ssh couldn't connect / spawn),
+    // not an empty directory — ssh.run only rejects on that. Swallowing it made the
+    // dir picker show "No subdirectories" over a dead connection, so the user could
+    // confirm a folder and then hit the silent session-create failure downstream.
+    // Rethrow so RemoteDirPicker surfaces it (it already renders readDir errors).
+    throw err instanceof Error ? err : new Error(String(err))
   }
 }
 

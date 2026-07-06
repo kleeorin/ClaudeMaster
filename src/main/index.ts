@@ -798,6 +798,18 @@ ipcMain.handle('dialog:saveFile', async (_, defaultName?: string) => {
   return result.canceled ? null : (result.filePath ?? null)
 })
 
+// Last-resort net: an async throw with no local handler (a child-process 'error'
+// we didn't wire, a stray rejected promise) would otherwise kill the whole main
+// process — every session's terminal dies at once with no explanation. Log it and
+// keep running; the specific handlers above are what actually report failures to
+// the user, this just stops one stray throw from taking the app down.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason)
+})
+
 app.whenReady().then(async () => {
   // Start the app-control server before any session launches so configFor() has a port.
   try { await appMcp.start() } catch (e) { console.error('app-control MCP server failed to start:', e) }

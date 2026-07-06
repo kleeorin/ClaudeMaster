@@ -101,7 +101,9 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
     return !!st && LIVE_KERNEL.includes(st)
   }
 
-  const refresh = () => window.api.fs.readDir(path).then(setEntries)
+  // readDir can reject for a remote path whose ssh connection is down — catch so it
+  // doesn't become an unhandled rejection; an unreadable dir just shows as empty.
+  const refresh = () => window.api.fs.readDir(path).then(setEntries).catch(() => setEntries([]))
 
   useEffect(() => {
     let cancelled = false
@@ -109,6 +111,10 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
     window.api.fs.readDir(path).then((list) => {
       if (cancelled) return
       setEntries(list)
+      setLoading(false)
+    }).catch(() => {
+      if (cancelled) return
+      setEntries([])
       setLoading(false)
     })
     return () => { cancelled = true }
@@ -121,7 +127,7 @@ export function FileBrowserView({ sessionId, cwd }: Props) {
   useEffect(() => {
     window.api.fs.watch(path)
     const off = window.api.on.fileChanged((changed) => {
-      if (changed === path) window.api.fs.readDir(path).then(setEntries)
+      if (changed === path) window.api.fs.readDir(path).then(setEntries).catch(() => setEntries([]))
     })
     return () => { off(); window.api.fs.unwatch(path) }
   }, [path])

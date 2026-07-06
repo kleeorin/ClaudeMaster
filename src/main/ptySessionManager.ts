@@ -117,15 +117,28 @@ export class PtySessionManager extends EventEmitter implements SessionBackend {
     // Remote gets the app-control MCP server reverse-tunnelled in (same port on
     // both ends) so remote claude can reach it at 127.0.0.1:<port>.
     const tunnelPort = remote ? this.opts.reverseTunnelPort?.() : undefined
-    const ptyProcess = remote
-      ? pty.spawn('ssh', ssh.interactiveArgs(remote, remoteClaudeCmd(parseTarget(cwd).path || '.', args), tunnelPort), {
-          name: 'xterm-256color', cols: 80, rows: 24,
-          cwd: homedir(), env: process.env as Record<string, string>,
-        })
-      : pty.spawn('claude', args, {
-          name: 'xterm-256color', cols: 80, rows: 24,
-          cwd: cwd || homedir(), env: process.env as Record<string, string>,
-        })
+    // node-pty throws SYNCHRONOUSLY if the native spawn-helper can't launch (e.g. it
+    // lost its exec bit on a fresh install — see scripts/fix-native-perms.cjs). Left
+    // uncaught this rejects the session:create IPC call and the session silently never
+    // appears. Catch it and mark the session failed-to-start so the UI shows Retry.
+    let ptyProcess: pty.IPty
+    try {
+      ptyProcess = remote
+        ? pty.spawn('ssh', ssh.interactiveArgs(remote, remoteClaudeCmd(parseTarget(cwd).path || '.', args), tunnelPort), {
+            name: 'xterm-256color', cols: 80, rows: 24,
+            cwd: homedir(), env: process.env as Record<string, string>,
+          })
+        : pty.spawn('claude', args, {
+            name: 'xterm-256color', cols: 80, rows: 24,
+            cwd: cwd || homedir(), env: process.env as Record<string, string>,
+          })
+    } catch (err) {
+      session.pty = null
+      session.state = 'exited'
+      const msg = err instanceof Error ? err.message : String(err)
+      this.emit('exit', id, true, `failed to start: ${msg}`)
+      return
+    }
 
     session.pty = ptyProcess
     session.startedAt = Date.now()
