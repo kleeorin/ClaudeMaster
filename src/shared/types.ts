@@ -134,6 +134,10 @@ export interface RemoteConfig {
   host: string
   defaultDir: string
   sshOptions?: string[]
+  // Absolute path to a Python interpreter to launch Jupyter with (e.g. a shared
+  // venv's `.venv/bin/python3` that has jupyter_server installed). When unset, the
+  // remote's login-shell `python3` is used — which often lacks jupyter_server.
+  pythonPath?: string
 }
 
 // A top-level `Host` alias discovered in ~/.ssh/config, offered as a one-click
@@ -143,6 +147,15 @@ export interface SshConfigHost {
   alias: string
   hostName?: string
   user?: string
+  port?: string   // shown only when non-default (not 22)
+}
+
+// The connection identity ssh resolves for a destination (`ssh -G`), for display
+// so the manager shows who/where you'll actually connect as.
+export interface ResolvedHost {
+  hostName?: string
+  user?: string
+  port?: string
 }
 
 // cwd/rootDir strings for remote sessions are encoded as `remote://<id>/<abs>`

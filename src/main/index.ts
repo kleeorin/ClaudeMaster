@@ -12,7 +12,7 @@ import { listModels } from './models'
 import * as conversations from './conversations'
 import { AppControlMcpServer } from './mcpServer'
 import { PaneManager } from './paneManager'
-import { JupyterManager } from './jupyterManager'
+import { JupyterManager, findNearestPython } from './jupyterManager'
 import * as gitManager from './gitManager'
 import { saveState, loadState } from './sessionPersistence'
 import * as remotes from './remotes'
@@ -440,12 +440,29 @@ appMcp.register({
 })
 ipcMain.handle('remotes:list', () => remotes.list())
 ipcMain.handle('remotes:add', (_, input: Omit<RemoteConfig, 'id'>) => remotes.add(input))
-ipcMain.handle('remotes:update', (_, remote: RemoteConfig) => remotes.update(remote))
-ipcMain.handle('remotes:remove', (_, id: string) => remotes.remove(id))
+ipcMain.handle('remotes:update', async (_, remote: RemoteConfig) => {
+  const prev = await remotes.get(remote.id)
+  await remotes.update(remote)
+  // A JupyterManager caches the RemoteConfig it was built with, so an edit (e.g. a
+  // new pythonPath) wouldn't take effect until restart. Rebuild it — but only when a
+  // LAUNCH-relevant field changed, so a cosmetic edit (label/defaultDir) doesn't
+  // tear down a running server and kill its open kernels.
+  const launchChanged = !prev
+    || prev.pythonPath !== remote.pythonPath
+    || prev.host !== remote.host
+    || (prev.sshOptions ?? []).join('\x00') !== (remote.sshOptions ?? []).join('\x00')
+  if (launchChanged) invalidateRemoteJupyter(remote.id)
+})
+ipcMain.handle('remotes:remove', async (_, id: string) => {
+  await remotes.remove(id)
+  invalidateRemoteJupyter(id)
+})
 ipcMain.handle('remotes:test', (_, remote: RemoteConfig) => remotes.test(remote))
 ipcMain.handle('remotes:homeDir', (_, remote: RemoteConfig) => remotes.homeDir(remote))
 // Top-level Host aliases from ~/.ssh/config, for one-click quick-add in the picker.
 ipcMain.handle('remotes:sshConfigHosts', () => sshConfig.listHosts())
+// Resolve a saved remote's real user/host/port (via `ssh -G`) for display.
+ipcMain.handle('remotes:resolveHost', (_, host: string, sshOptions?: string[]) => sshConfig.resolve(host, sshOptions ?? []))
 
 ipcMain.handle('pane:create', async (_, cwd: string) => panes.create(cwd, await remoteFor(cwd)))
 ipcMain.handle('pane:destroy', (_, id: string) => panes.destroy(id))
@@ -683,15 +700,46 @@ ipcMain.handle('docs:create', async (_, rootDir: string, target: string) =>
   docsIndex.createDoc(rootDir, target, await remoteFor(rootDir))
 )
 
-// One Jupyter server per host: the local one, plus a lazily-created tunneled
-// server per remote. `dir` is the notebook's (possibly remote-encoded) directory,
-// used only to pick the right server.
+// Jupyter servers: the local one, plus lazily-created tunneled servers keyed by
+// `${remoteId}:${interpreter}`. `path` is the notebook's (possibly remote-encoded)
+// path, used to pick the host AND to resolve which interpreter launches the server.
 const remoteJupyter = new Map<string, JupyterManager>()
-async function jupyterFor(dir?: string): Promise<JupyterManager> {
-  const remote = dir ? await remoteFor(dir) : undefined
+// Interpreter resolved by walking up from a notebook's directory, cached per
+// `${remoteId}:${startDir}` so the ssh walk runs at most once per directory.
+const nearestPythonCache = new Map<string, string>()
+// Tear down + forget ALL of a host's cached Jupyter servers and resolved
+// interpreters (on remote edit/removal) so they rebuild from the current
+// RemoteConfig next time. Hoisted, so the remotes:update/remove handlers can call it.
+function invalidateRemoteJupyter(id: string): void {
+  const prefix = `${id}:`
+  for (const [key, jm] of remoteJupyter) {
+    if (key.startsWith(prefix)) { jm.destroy(); remoteJupyter.delete(key) }
+  }
+  for (const key of nearestPythonCache.keys()) {
+    if (key.startsWith(prefix)) nearestPythonCache.delete(key)
+  }
+}
+async function jupyterFor(path?: string): Promise<JupyterManager> {
+  const remote = path ? await remoteFor(path) : undefined
   if (!remote) return jupyter
-  let jm = remoteJupyter.get(remote.id)
-  if (!jm) { jm = new JupyterManager(remote); remoteJupyter.set(remote.id, jm) }
+  // Interpreter to launch Jupyter with: an explicit remote.pythonPath override
+  // wins; otherwise walk up from the notebook's own directory for the nearest
+  // venv that actually has jupyter_server (falling back to bare python3). This is
+  // what lets a host with per-project venvs "just work" without hand-configuring
+  // a path — see findNearestPython.
+  let pythonPath = remote.pythonPath?.trim()
+  if (!pythonPath) {
+    const startDir = dirname(parseTarget(path!).path)
+    const cacheKey = `${remote.id}:${startDir}`
+    pythonPath = nearestPythonCache.get(cacheKey)
+    if (!pythonPath) {
+      pythonPath = (await findNearestPython(remote, startDir)) ?? 'python3'
+      nearestPythonCache.set(cacheKey, pythonPath)
+    }
+  }
+  const key = `${remote.id}:${pythonPath}`
+  let jm = remoteJupyter.get(key)
+  if (!jm) { jm = new JupyterManager({ ...remote, pythonPath }); remoteJupyter.set(key, jm) }
   return jm
 }
 ipcMain.handle('jupyter:start', async (_, dir?: string) => (await jupyterFor(dir)).start())

@@ -1,14 +1,33 @@
 import { execFile } from 'child_process'
-import { app } from 'electron'
+import { homedir } from 'os'
 import { join } from 'path'
+import { mkdirSync } from 'fs'
 import type { RemoteConfig } from '../shared/types'
 
 // OpenSSH connection multiplexing. fs/git polling (directory reads, `git status`)
 // fires often, so a fresh TCP+auth handshake per call would be unusably slow.
 // ControlMaster keeps one connection alive and routes every later ssh call over
 // it; ControlPersist keeps it warm briefly after the last use.
+//
+// The socket MUST live in a short, space-free directory. It used to sit under
+// app.getPath('userData'), which on macOS is "~/Library/Application Support/…":
+//  - the SPACE breaks ssh's `-o ControlPath=…` parsing (ssh tokenises the value
+//    like a config line → "keyword controlpath extra arguments at end of line"),
+//    which broke *every* ssh call on macOS; and
+//  - the long nested path can exceed the 104-byte Unix-domain-socket path limit.
+// ~/.ssh is short and space-free, and `%C` (a hash of the connection params) is a
+// fixed short token, so we stay well under the limit. %C needs OpenSSH ≥ 6.7.
+let cmDirReady = false
 function controlArgs(): string[] {
-  const cm = join(app.getPath('userData'), 'ssh-cm-%r@%h:%p')
+  const dir = join(homedir(), '.ssh')
+  if (!cmDirReady) {
+    try { mkdirSync(dir, { recursive: true, mode: 0o700 }) } catch { /* already exists / not writable */ }
+    cmDirReady = true
+  }
+  // No quoting needed: home dirs can't contain spaces on macOS/Linux, and `%C`
+  // has none, so the value is space-free by construction — which is exactly what
+  // ssh's `-o` parser requires.
+  const cm = join(dir, 'cm-%C')
   return [
     '-o', 'ControlMaster=auto',
     '-o', `ControlPath=${cm}`,

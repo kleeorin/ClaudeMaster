@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNotebooks } from '../store/notebooks'
 import { Cell } from './notebook/Cell'
+import { RemoteDirPicker } from './RemoteDirPicker'
+import { parseTarget } from '../../../shared/remotePath'
+import type { RemoteConfig } from '../../../shared/types'
 
 const STATUS_DOT: Record<string, string> = {
   idle:     'bg-ctp-green',
@@ -25,6 +28,8 @@ export function NotebookView({ path, onDirtyChange }: Props) {
     checkExternalChange, reloadFromDisk, dismissConflict,
   } = useNotebooks()
   const [saveError, setSaveError] = useState<string | null>(null)
+  // Pending remote directory pick (custom kernel env dir on a remote notebook).
+  const [remotePick, setRemotePick] = useState<{ remote: RemoteConfig; initialDir: string } | null>(null)
   // Command-mode selection (Jupyter-style): set on click / Esc out of the editor.
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -32,6 +37,18 @@ export function NotebookView({ path, onDirtyChange }: Props) {
 
   const onKernelChange = async (value: string) => {
     if (value === '__pick__') {
+      // A remote notebook's kernel runs on the remote host, so its env directory
+      // must be browsed there — Electron's native dialog is local-only. Fall back
+      // to the native dialog for local notebooks (or if the remote is unknown).
+      const { remoteId } = parseTarget(path)
+      if (remoteId) {
+        const remote = (await window.api.remotes.list()).find((r) => r.id === remoteId)
+        if (remote) {
+          const remotePath = parseTarget(path).path
+          setRemotePick({ remote, initialDir: remotePath.slice(0, remotePath.lastIndexOf('/')) || '/' })
+          return
+        }
+      }
       const dir = await window.api.dialog.openDir()
       if (dir) await setKernelDir(path, dir)
       return
@@ -146,6 +163,15 @@ export function NotebookView({ path, onDirtyChange }: Props) {
 
   return (
     <div className="flex flex-col h-full bg-ctp-base overflow-hidden">
+      {remotePick && (
+        <RemoteDirPicker
+          remote={remotePick.remote}
+          initialDir={remotePick.initialDir}
+          title="Kernel environment directory"
+          onChoose={(dir) => { setRemotePick(null); void setKernelDir(path, dir) }}
+          onCancel={() => setRemotePick(null)}
+        />
+      )}
       {/* Header */}
       <div className="h-9 shrink-0 flex items-center gap-2 px-3 bg-ctp-mantle border-b border-ctp-surface0">
         <span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[kernelStatus ?? 'dead']}`} />

@@ -1,4 +1,4 @@
-import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta, EffectivePermissions, PermissionMode, PermissionScope, PermissionAction, SetModeResult, SshConfigHost } from '../../shared/types'
+import type { SessionInfo, SessionState, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta, EffectivePermissions, PermissionMode, PermissionScope, PermissionAction, SetModeResult, SshConfigHost, ResolvedHost } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -51,6 +51,7 @@ declare global {
         test: (remote: RemoteConfig) => Promise<RemoteTest>
         homeDir: (remote: RemoteConfig) => Promise<string>
         sshConfigHosts: () => Promise<SshConfigHost[]>
+        resolveHost: (host: string, sshOptions?: string[]) => Promise<ResolvedHost>
       }
       pane: {
         create: (cwd: string) => Promise<string>

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta, EffectivePermissions, PermissionMode, PermissionScope, PermissionAction, SetModeResult, SshConfigHost } from '../shared/types'
+import type { SessionInfo, SavedSession, DirEntry, FilePreview, WriteResult, GitStatus, GitDiff, GitResult, GitLog, GitBranches, RemoteConfig, RemoteTest, ClaudeEvent, PermissionRequest, PermissionDecision, ConversationMeta, EffectivePermissions, PermissionMode, PermissionScope, PermissionAction, SetModeResult, SshConfigHost, ResolvedHost } from '../shared/types'
 
 // The whole-app frontend, handed over synchronously by main via additionalArguments
 // so the renderer can pick its chat surface (ChatView vs TerminalView) on first
@@ -100,6 +100,9 @@ contextBridge.exposeInMainWorld('api', {
     // ~/.ssh/config Host aliases, for one-click quick-add.
     sshConfigHosts: (): Promise<SshConfigHost[]> =>
       ipcRenderer.invoke('remotes:sshConfigHosts'),
+    // Resolve a host's real user/host/port for display (via `ssh -G`).
+    resolveHost: (host: string, sshOptions?: string[]): Promise<ResolvedHost> =>
+      ipcRenderer.invoke('remotes:resolveHost', host, sshOptions),
   },
   pane: {
     create: (cwd: string): Promise<string> =>

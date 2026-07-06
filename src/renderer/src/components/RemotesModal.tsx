@@ -1,23 +1,39 @@
 import { useEffect, useState, useCallback } from 'react'
-import type { RemoteConfig, SshConfigHost } from '../../../shared/types'
+import type { RemoteConfig, SshConfigHost, ResolvedHost } from '../../../shared/types'
 
 type Draft = Omit<RemoteConfig, 'id'> & { id?: string }
 
-const EMPTY: Draft = { label: '', host: '', defaultDir: '', sshOptions: [] }
+const EMPTY: Draft = { label: '', host: '', defaultDir: '', sshOptions: [], pythonPath: '' }
+
+// Render a resolved connection identity as user@host[:port], falling back to the
+// raw destination when ssh couldn't resolve anything.
+function identity(r: { user?: string; hostName?: string; port?: string }, fallback: string): string {
+  if (!r.hostName && !r.user) return fallback
+  const base = (r.user ? `${r.user}@` : '') + (r.hostName ?? fallback)
+  return r.port ? `${base}:${r.port}` : base
+}
 
 // Manage saved SSH remotes: list, add, edit, test, delete. `onChanged` lets the
 // opener refresh its own copy of the list (e.g. the New Session menu).
 export function RemotesModal({ onClose, onChanged }: { onClose: () => void; onChanged?: () => void }) {
   const [remotes, setRemotes] = useState<RemoteConfig[]>([])
   const [sshHosts, setSshHosts] = useState<SshConfigHost[]>([])
+  const [resolved, setResolved] = useState<Record<string, ResolvedHost>>({})  // remoteId → real user/host/port
   const [draft, setDraft] = useState<Draft | null>(null)
   const [optsText, setOptsText] = useState('')
   const [testing, setTesting] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null)
 
   const refresh = useCallback(async () => {
-    setRemotes(await window.api.remotes.list())
+    const list = await window.api.remotes.list()
+    setRemotes(list)
     onChanged?.()
+    // Resolve each remote's real identity (user/host/port) the way ssh will, so the
+    // manager shows who you'll actually connect as — not just the alias.
+    const entries = await Promise.all(
+      list.map(async (r) => [r.id, await window.api.remotes.resolveHost(r.host, r.sshOptions)] as const),
+    )
+    setResolved(Object.fromEntries(entries))
   }, [onChanged])
 
   useEffect(() => { void refresh() }, [refresh])
@@ -60,13 +76,15 @@ export function RemotesModal({ onClose, onChanged }: { onClose: () => void; onCh
     // directory, resolved live when you start a session.
     defaultDir: d.defaultDir.trim(),
     sshOptions: optsText.trim() ? optsText.trim().split(/\s+/) : [],
+    // Empty ⇒ omit, so the remote falls back to its login-shell python3.
+    pythonPath: d.pythonPath?.trim() || undefined,
   })
 
   const save = async () => {
     if (!draft || !draft.host.trim()) return
     const d = draftWithOpts(draft)
     if (draft.id) await window.api.remotes.update(d)
-    else await window.api.remotes.add({ label: d.label, host: d.host, defaultDir: d.defaultDir, sshOptions: d.sshOptions })
+    else await window.api.remotes.add({ label: d.label, host: d.host, defaultDir: d.defaultDir, sshOptions: d.sshOptions, pythonPath: d.pythonPath })
     setDraft(null)
     await refresh()
   }
@@ -107,7 +125,9 @@ export function RemotesModal({ onClose, onChanged }: { onClose: () => void; onCh
               <div key={r.id} className="flex items-center gap-2 px-2 py-1.5 rounded bg-ctp-mantle">
                 <div className="flex-1 min-w-0">
                   <div className="text-xs text-ctp-text truncate">{r.label}</div>
-                  <div className="text-[11px] text-ctp-overlay font-mono truncate">{r.host}{r.defaultDir ? `:${r.defaultDir}` : ''}</div>
+                  <div className="text-[11px] text-ctp-overlay font-mono truncate">
+                    {identity(resolved[r.id] ?? {}, r.host)}{r.defaultDir ? `:${r.defaultDir}` : ''}
+                  </div>
                 </div>
                 <button onClick={() => edit(r)} className="px-2 py-1 text-[11px] rounded bg-ctp-surface0 text-ctp-subtext hover:text-ctp-text">Edit</button>
                 <button onClick={() => del(r)} className="px-2 py-1 text-[11px] rounded bg-ctp-surface0 text-ctp-red hover:bg-ctp-surface1">Delete</button>
@@ -123,12 +143,12 @@ export function RemotesModal({ onClose, onChanged }: { onClose: () => void; onCh
                   <button
                     key={h.alias}
                     onClick={() => quickAdd(h)}
-                    title={`${h.user ? h.user + '@' : ''}${h.hostName ?? h.alias} — add as a remote`}
+                    title={`${identity(h, h.alias)} — add as a remote`}
                     className="flex items-center gap-1 px-2 py-1 text-[11px] rounded bg-ctp-surface0 text-ctp-subtext hover:text-ctp-text hover:bg-ctp-surface1"
                   >
                     <span className="text-ctp-green">+</span>
                     <span className="font-mono">{h.alias}</span>
-                    {h.hostName && <span className="text-ctp-overlay">({h.hostName})</span>}
+                    {(h.hostName || h.user) && <span className="text-ctp-overlay">({identity(h, h.alias)})</span>}
                   </button>
                 ))}
               </div>
@@ -142,6 +162,7 @@ export function RemotesModal({ onClose, onChanged }: { onClose: () => void; onCh
               <Field label="SSH host" value={draft.host} onChange={(v) => setDraft({ ...draft, host: v })} placeholder="user@host or ssh-config alias" mono />
               <Field label="Start folder (optional)" value={draft.defaultDir} onChange={(v) => setDraft({ ...draft, defaultDir: v })} placeholder="blank = home; you browse from there" mono />
               <Field label="SSH options" value={optsText} onChange={setOptsText} placeholder="-p 2222 -i ~/.ssh/id_ed25519" mono />
+              <Field label="Python interpreter (optional)" value={draft.pythonPath ?? ''} onChange={(v) => setDraft({ ...draft, pythonPath: v })} placeholder="blank = python3; e.g. /path/.venv/bin/python3 (Jupyter)" mono />
               {result && (
                 <div className={`text-xs ${result.ok ? 'text-ctp-green' : 'text-ctp-red'}`}>{result.msg}</div>
               )}

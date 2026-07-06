@@ -4,6 +4,31 @@ import crypto from 'crypto'
 import type { RemoteConfig } from '../shared/types'
 import * as ssh from './ssh'
 
+// Walk upward from `startDir` (toward '/'), checking .venv/bin/python3 and
+// venv/bin/python3 at each level for an interpreter that can actually import
+// jupyter_server; return the first hit, else null. One ssh round trip runs the
+// whole walk in a single shell loop (not one call per level). An explicit
+// remote.pythonPath override always wins over this search — see the caller.
+export async function findNearestPython(remote: RemoteConfig, startDir: string): Promise<string | null> {
+  const script = [
+    `d=${ssh.shquote(startDir)}`,
+    'while :; do',
+    '  for v in .venv venv; do',
+    '    py="$d/$v/bin/python3"',
+    '    if [ -x "$py" ] && "$py" -c "import jupyter_server" >/dev/null 2>&1; then echo "$py"; exit 0; fi',
+    '  done',
+    '  [ "$d" = "/" ] && exit 1',
+    '  d=$(dirname "$d")',
+    'done',
+  ].join('\n')
+  try {
+    const { stdout, code } = await ssh.run(remote, ['sh', '-lc', script])
+    return code === 0 ? (stdout.trim() || null) : null
+  } catch {
+    return null
+  }
+}
+
 // Ask the OS for a free localhost port by binding to 0 and reading it back.
 function freeLocalPort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -55,13 +80,16 @@ export class JupyterManager {
 
   private async _spawnRemote(remote: RemoteConfig): Promise<{ url: string; token: string } | null> {
     const token = crypto.randomBytes(24).toString('hex')
+    // Interpreter to run Jupyter with: an explicitly configured one (e.g. a shared
+    // venv that actually has jupyter_server) else the login-shell python3.
+    const py = remote.pythonPath?.trim() || 'python3'
     // We need the remote port up front to set up the tunnel, so pick a free one on
     // the remote (tiny TOCTOU window) and pin Jupyter to it.
     let remotePort: number
     let localPort: number
     try {
       const { stdout, code } = await ssh.run(remote, [
-        'python3', '-c',
+        py, '-c',
         'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()',
       ])
       remotePort = Number(stdout.trim())
@@ -73,9 +101,11 @@ export class JupyterManager {
 
     // One ssh invocation both forwards localPort→remote:remotePort and runs the
     // server (through a login shell so `jupyter`/`python3` are on PATH). Killing
-    // this ssh child tears down both the tunnel and the remote server.
+    // this ssh child tears down both the tunnel and the remote server. `py` may be
+    // an auto-discovered venv path (from findNearestPython) whose tree can contain
+    // spaces, so it's shell-quoted into the command.
     const serverCmd =
-      `python3 -m jupyter server --no-browser --port=${remotePort} --ip=127.0.0.1 ` +
+      `${ssh.shquote(py)} -m jupyter server --no-browser --port=${remotePort} --ip=127.0.0.1 ` +
       `--ServerApp.token=${token} --ServerApp.disable_check_xsrf=True ` +
       `--ServerApp.allow_origin='*' --ServerApp.root_dir=/`
     const args = [
@@ -134,7 +164,10 @@ export class JupyterManager {
     // (recent Debian / Raspberry Pi OS / macOS) refuses a normal install, so fall
     // back to --break-system-packages.
     const pkgs = 'jupyter-server notebook ipykernel'
-    const script = `python3 -m pip install ${pkgs} || python3 -m pip install --break-system-packages ${pkgs}`
+    // Install into the same interpreter we'll launch with, so the packages land
+    // where the server looks for them.
+    const py = this.remote?.pythonPath?.trim() || 'python3'
+    const script = `${py} -m pip install ${pkgs} || ${py} -m pip install --break-system-packages ${pkgs}`
     if (this.remote) {
       return ssh.run(this.remote, ['sh', '-lc', script], { maxBuffer: 64 * 1024 * 1024 })
         .then(({ code }) => code === 0)

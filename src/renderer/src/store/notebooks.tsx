@@ -156,9 +156,12 @@ const serverInfos = new Map<string, { url: string; token: string } | null>()
 
 async function getServerInfo(path: string): Promise<{ url: string; token: string } | null> {
   const key = serverKey(path)
-  if (serverInfos.has(key)) return serverInfos.get(key)!
+  const cached = serverInfos.get(key)
+  if (cached) return cached  // reuse only a LIVE server
+  // Don't cache a failed start (null): a later attempt — e.g. after fixing the
+  // remote's Python interpreter — must be able to retry without an app restart.
   const info = await window.api.jupyter.start(path)
-  serverInfos.set(key, info)
+  if (info) serverInfos.set(key, info)
   return info
 }
 

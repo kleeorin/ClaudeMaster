@@ -60,6 +60,8 @@ export function Sidebar({ width }: { width?: number }) {
   const [models, setModels] = useState<Array<{ id: string; name: string }>>([])
   const [newRole, setNewRole] = useState('general')
   const [newModel, setNewModel] = useState('default')
+  // Optional custom name for the next new session; blank ⇒ the folder's basename.
+  const [newName, setNewName] = useState('')
   const [subRole, setSubRole] = useState('general')
   const [subModel, setSubModel] = useState('default')
   const roleArg = (r: string) => (r === 'general' ? undefined : r)
@@ -104,7 +106,7 @@ export function Sidebar({ width }: { width?: number }) {
       // you browse to the project folder (nothing decided a priori).
       initialDir: remote.defaultDir,
       title: 'New session — choose a folder',
-      onChoose: (dir) => { setDirPick(null); void createRemoteSession(remote, dir, roleArg(newRole), modelArg(newModel)) },
+      onChoose: (dir) => { setDirPick(null); void createRemoteSession(remote, dir, roleArg(newRole), modelArg(newModel), newName); setNewName('') },
     })
   }
 
@@ -312,11 +314,12 @@ export function Sidebar({ width }: { width?: number }) {
             className="absolute bottom-full left-2 right-2 mb-1 bg-ctp-surface0 border border-ctp-surface1 rounded shadow-lg py-1 select-none z-50"
             onClick={(e) => e.stopPropagation()}
           >
+            <MenuField label="Name" value={newName} onChange={setNewName} placeholder="optional — folder name" />
             <MenuSelect label="Role" value={newRole} onChange={setNewRole} options={agents} />
             <MenuSelect label="Model" value={newModel} onChange={setNewModel} options={modelOptions} />
             <div className="mx-2 my-0.5 border-t border-ctp-surface1" />
             <button
-              onClick={() => { setNewMenu(false); void createSession(roleArg(newRole), modelArg(newModel)) }}
+              onClick={() => { setNewMenu(false); void createSession(roleArg(newRole), modelArg(newModel), newName); setNewName('') }}
               className="w-full text-left px-3 py-1.5 text-xs text-ctp-text hover:bg-ctp-surface1 transition-colors"
             >
               Local…
@@ -410,6 +413,28 @@ function MenuSelect({ label, value, onChange, options }: {
       >
         {options.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
       </select>
+    </div>
+  )
+}
+
+// A labelled text input row for the New Session dropdown (the optional session
+// name), styled to match MenuSelect. stopPropagation keeps clicks from dismissing
+// the surrounding menu; Escape still bubbles to the menu's close handler.
+function MenuField({ label, value, onChange, placeholder }: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+}) {
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1.5" onClick={(e) => e.stopPropagation()}>
+      <span className="w-10 shrink-0 text-[10px] uppercase tracking-wide text-ctp-overlay">{label}</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="flex-1 min-w-0 bg-ctp-surface1 text-ctp-text text-xs rounded px-1.5 py-0.5 outline-none placeholder:text-ctp-overlay/60"
+      />
     </div>
   )
 }

@@ -181,8 +181,9 @@ function reducer(state: State, action: Action): State {
 }
 
 interface ContextValue extends State {
-  createSession: (agentId?: string, model?: string) => Promise<void>
-  createRemoteSession: (remote: RemoteConfig, dir: string, agentId?: string, model?: string) => Promise<void>
+  // `name` overrides the session label; blank/undefined falls back to the folder.
+  createSession: (agentId?: string, model?: string, name?: string) => Promise<void>
+  createRemoteSession: (remote: RemoteConfig, dir: string, agentId?: string, model?: string, name?: string) => Promise<void>
   relaunchSession: (id: string) => Promise<void>
   addSubsession: (parentId: string, dir?: string, agentId?: string, model?: string) => Promise<void>
   // App-control (MCP) spawners: no dialog, dir passed explicitly, return the new
@@ -362,22 +363,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const createSession = useCallback(async (agentId?: string, model?: string) => {
+  const createSession = useCallback(async (agentId?: string, model?: string, name?: string) => {
     const cwd = await window.api.dialog.openDir()
     if (!cwd) return
-    const name = cwd.split('/').pop() || 'Session'
-    const id = await window.api.session.create(name, cwd, cwd, undefined, false, undefined, agentId, model)
-    dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, agentId, model, state: 'idle' } })
+    // A typed name wins; otherwise the folder's basename is the default label.
+    const finalName = name?.trim() || cwd.split('/').pop() || 'Session'
+    const id = await window.api.session.create(finalName, cwd, cwd, undefined, false, undefined, agentId, model)
+    dispatch({ type: 'ADD', session: { id, name: finalName, cwd, rootDir: cwd, agentId, model, state: 'idle' } })
   }, [])
 
   // Start a session on a remote host. `dir` is a plain absolute path on that host;
   // we encode it as remote://id/dir so every downstream fs/git call routes over
   // ssh to the right box (see shared/remotePath.ts).
-  const createRemoteSession = useCallback(async (remote: RemoteConfig, dir: string, agentId?: string, model?: string) => {
+  const createRemoteSession = useCallback(async (remote: RemoteConfig, dir: string, agentId?: string, model?: string, name?: string) => {
     const cwd = makeRemotePath(remote.id, dir)
-    const name = dir.split('/').filter(Boolean).pop() || remote.label
-    const id = await window.api.session.create(name, cwd, cwd, undefined, false, undefined, agentId, model)
-    dispatch({ type: 'ADD', session: { id, name, cwd, rootDir: cwd, remoteId: remote.id, agentId, model, state: 'idle' } })
+    // A typed name wins; otherwise the folder's basename (or the remote label).
+    const finalName = name?.trim() || dir.split('/').filter(Boolean).pop() || remote.label
+    const id = await window.api.session.create(finalName, cwd, cwd, undefined, false, undefined, agentId, model)
+    dispatch({ type: 'ADD', session: { id, name: finalName, cwd, rootDir: cwd, remoteId: remote.id, agentId, model, state: 'idle' } })
   }, [])
 
   // A subsession runs its own Claude in the parent's directory, but scopes its
