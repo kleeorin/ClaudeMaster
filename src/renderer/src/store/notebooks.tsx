@@ -39,6 +39,9 @@ interface Notebook {
   dirty: boolean
   baseline: string           // last text we loaded/saved; disk == baseline ⇒ no external change
   conflict: boolean          // disk changed under us while the pane was dirty
+  // A cell the view should scroll to + flash (a fresh cell, or a Claude/app edit).
+  // The nonce re-fires the reveal even when the same cell changes twice in a row.
+  reveal?: { cellId: string; nonce: number }
 }
 
 type State = Record<string, Notebook>
@@ -61,6 +64,7 @@ type Action =
   | { type: 'ADD_OUTPUT'; path: string; cellId: string; output: CellOutput }
   | { type: 'SET_EXEC_COUNT'; path: string; cellId: string; count: number }
   | { type: 'CLEAR_OUTPUTS'; path: string; cellId: string }
+  | { type: 'REVEAL'; path: string; cellId: string }
   | { type: 'RENAME'; from: string; to: string }
 
 function newCell(type: CellType = 'code'): Cell {
@@ -96,6 +100,10 @@ function reducer(state: State, action: Action): State {
       return nb ? { ...state, [action.path]: { ...nb, dirty: false, baseline: action.baseline, conflict: false } } : state
     case 'SET_CONFLICT':
       return nb ? { ...state, [action.path]: { ...nb, conflict: action.conflict } } : state
+    case 'REVEAL':
+      // Pure UI signal — must NOT mark dirty. Bump the nonce so an identical
+      // cellId still triggers the view's reveal effect.
+      return nb ? { ...state, [action.path]: { ...nb, reveal: { cellId: action.cellId, nonce: (nb.reveal?.nonce ?? 0) + 1 } } } : state
     case 'ADD_CELL':
       return nb ? dirtyPatch({ ...nb, cells: [...nb.cells, action.cell] }) : state
     case 'INSERT_CELL': {
@@ -229,6 +237,7 @@ interface ContextValue {
   setCellType: (path: string, cellId: string, type: CellType) => void
   removeCell: (path: string, cellId: string) => void
   updateCode: (path: string, cellId: string, code: string) => void
+  revealCell: (path: string, cellId: string) => void
   applyAppEdit: (path: string, op: string, args: Record<string, unknown>, isOpen: boolean) => Promise<string>
   createNotebook: (path: string) => Promise<string>
   checkExternalChange: (path: string) => Promise<void>
@@ -409,6 +418,11 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'UPDATE_CODE', path, cellId, code })
   }, [])
 
+  // Ask the open pane to scroll to + flash a cell (a fresh insert, or an app edit).
+  const revealCell = useCallback((path: string, cellId: string) => {
+    dispatch({ type: 'REVEAL', path, cellId })
+  }, [])
+
   // Apply an app-control (MCP tool) edit to a notebook, addressed by 0-based cell
   // index (Claude doesn't know cell ids). `isOpen` (whether the path is currently
   // an open tab in some pane — decided by the caller against the file-browser
@@ -446,35 +460,42 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
           const cellId = current[i].id
           dispatch({ type: 'UPDATE_CODE', path, cellId, code: String(args.source ?? '') })
           dispatch({ type: 'CLEAR_OUTPUTS', path, cellId })  // source changed → outputs stale
+          dispatch({ type: 'REVEAL', path, cellId })         // scroll the pane to Claude's edit
           return `ok (edited cell ${i}; ${N} cells, unsaved in the open pane)`
         }
         case 'add_cell': {
           const c = newCell(asType(args.type)); c.code = String(args.source ?? '')
           dispatch({ type: 'ADD_CELL', path, cell: c })
+          dispatch({ type: 'REVEAL', path, cellId: c.id })
           return `ok (${N + 1} cells, unsaved in the open pane)`
         }
         case 'insert_cell': {
           const i = Math.max(0, Math.min(num(args.index), N))
           const c = newCell(asType(args.type)); c.code = String(args.source ?? '')
           dispatch({ type: 'INSERT_CELL', path, index: i, cell: c })
+          dispatch({ type: 'REVEAL', path, cellId: c.id })
           return `ok (${N + 1} cells, unsaved in the open pane)`
         }
         case 'delete_cell': {
           const i = num(args.index)
           if (!inRange(i)) return `error: cell index ${i} out of range (0..${N - 1})`
           dispatch({ type: 'REMOVE_CELL', path, cellId: current[i].id })
+          const neighbor = current[i + 1]?.id ?? current[i - 1]?.id  // jump to what's left where it was
+          if (neighbor) dispatch({ type: 'REVEAL', path, cellId: neighbor })
           return `ok (${N - 1} cells, unsaved in the open pane)`
         }
         case 'move_cell': {
           const from = num(args.from), to = num(args.to)
           if (!inRange(from) || !inRange(to)) return `error: cell index out of range (0..${N - 1})`
           dispatch({ type: 'MOVE_CELL', path, from, to })
+          dispatch({ type: 'REVEAL', path, cellId: current[from].id })  // follow the moved cell
           return `ok (moved cell ${from} → ${to}; unsaved in the open pane)`
         }
         case 'set_cell_type': {
           const i = num(args.index)
           if (!inRange(i)) return `error: cell index ${i} out of range (0..${N - 1})`
           dispatch({ type: 'SET_CELL_TYPE', path, cellId: current[i].id, cellType: asType(args.type) })
+          dispatch({ type: 'REVEAL', path, cellId: current[i].id })
           return `ok (cell ${i} → ${asType(args.type)}; unsaved in the open pane)`
         }
         default:
@@ -661,7 +682,7 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
     <NotebookContext.Provider value={{
       notebooks, specs,
       openNotebook, saveNotebook, setKernel, setKernelDir,
-      addCell, insertCell, moveCell, setCellType, removeCell, updateCode, applyAppEdit, createNotebook,
+      addCell, insertCell, moveCell, setCellType, removeCell, updateCode, revealCell, applyAppEdit, createNotebook,
       checkExternalChange, reloadFromDisk, dismissConflict,
       executeCell, runAll, restartAndRunAll, clearOutputs, clearAllOutputs,
       interruptKernel, restartKernel, shutdownKernel, installAndRetry,

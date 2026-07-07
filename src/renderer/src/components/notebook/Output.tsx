@@ -8,7 +8,9 @@ function AnsiText({ text }: { text: string }) {
 
 function MimeContent({ data }: { data: Record<string, string> }) {
   if (data['text/html']) {
-    return <div className="text-sm" dangerouslySetInnerHTML={{ __html: data['text/html'] }} />
+    // `nb-html` scopes the table styling in index.css that restores pandas
+    // DataFrame readability (the global reset strips th/td padding + borders).
+    return <div className="text-sm nb-html" dangerouslySetInnerHTML={{ __html: data['text/html'] }} />
   }
   if (data['image/png']) {
     return <img src={`data:image/png;base64,${data['image/png']}`} className="max-w-full" />

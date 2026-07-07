@@ -28,3 +28,44 @@ html, body, #root {
    suppress selection so passing over a terminal / editor doesn't fight it. */
 .cm-resizing-x, .cm-resizing-x * { cursor: col-resize !important; user-select: none !important; }
 .cm-resizing-y, .cm-resizing-y * { cursor: row-resize !important; user-select: none !important; }
+
+/* Rendered notebook HTML outputs (pandas DataFrames, rich reprs). The global
+   reset above zeroes th/td padding and Tailwind's preflight drops table borders,
+   so a pandas table renders as a run-together blob with the column names merged.
+   Restore readable, Catppuccin-themed table styling — scoped to .nb-html so it
+   only touches output HTML, never the app chrome. Wide tables scroll rather than
+   blow out the layout. */
+.nb-html { overflow-x: auto; }
+.nb-html table {
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  color: #cdd6f4;               /* ctp-text */
+  margin: 0.25rem 0;
+}
+.nb-html th, .nb-html td {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid #45475a;    /* ctp-surface1 */
+  vertical-align: top;
+}
+.nb-html td { text-align: right; }
+.nb-html thead th {
+  background: #313244;          /* ctp-surface0 */
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;          /* keep column names on one line, distinct */
+}
+.nb-html tbody th {             /* pandas renders the index as a row header */
+  background: #313244;
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+.nb-html tbody tr:nth-child(even) { background: rgba(49, 50, 68, 0.35); }
+
+/* Transient highlight when the view jumps to a cell (new cell, or a Claude/app
+   edit) so the change is easy to spot. */
+@keyframes nb-flash {
+  0%   { box-shadow: 0 0 0 2px rgba(203, 166, 247, 0.9); }   /* ctp-mauve */
+  100% { box-shadow: 0 0 0 2px rgba(203, 166, 247, 0); }
+}
+.nb-flash { animation: nb-flash 1.1s ease-out; }

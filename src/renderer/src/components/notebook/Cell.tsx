@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
 import { EditorState, type Extension } from '@codemirror/state'
 import { defaultKeymap, indentWithTab } from '@codemirror/commands'
@@ -33,6 +33,9 @@ export function Cell(props: Props) {
   const cbRef = useRef(props)
   cbRef.current = props
   const isCode = cell.type === 'code'
+  // Collapse a cell's output so a big result (long stream, tall table) doesn't
+  // fill the notebook. Persists across re-runs (Cell keyed by cell.id).
+  const [outputCollapsed, setOutputCollapsed] = useState(false)
 
   useEffect(() => {
     if (!editorRef.current) return
@@ -85,6 +88,9 @@ export function Cell(props: Props) {
     <div
       className={`group flex gap-2 rounded ${selected ? 'ring-1 ring-ctp-mauve/60' : ''}`}
       onMouseDown={onSelect}
+      // Also select on focus (React's onFocus bubbles) so keyboard navigation —
+      // e.g. Shift+Enter advancing into this cell — keeps "the cell I'm in" current.
+      onFocus={onSelect}
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' }}
       onDrop={(e) => {
         const from = Number(e.dataTransfer.getData('application/x-cell-index'))
@@ -110,8 +116,30 @@ export function Cell(props: Props) {
         </div>
 
         {isCode && cell.outputs.length > 0 && (
-          <div className="pl-1 border-l-2 border-ctp-surface1 space-y-1 py-1">
-            {cell.outputs.map((o, i) => <Output key={i} output={o} />)}
+          <div className="flex gap-1.5">
+            {/* Jupyter-style collapse gutter: click the LEFT EDGE of the output
+                (full height) to hide/show it — no scrolling up to a toolbar. It
+                also replaces the old left border as the output's visual margin. */}
+            <button
+              onClick={() => setOutputCollapsed((v) => !v)}
+              title={outputCollapsed ? 'Show output' : 'Hide output (click this bar)'}
+              aria-label={outputCollapsed ? 'Show output' : 'Hide output'}
+              className="shrink-0 w-2.5 self-stretch rounded-sm bg-ctp-surface1 hover:bg-ctp-mauve/70 transition-colors"
+            />
+            {outputCollapsed ? (
+              <button
+                onClick={() => setOutputCollapsed(false)}
+                className="text-[10px] text-ctp-overlay hover:text-ctp-text py-0.5"
+              >
+                {cell.outputs.length} output{cell.outputs.length > 1 ? 's' : ''} hidden — show
+              </button>
+            ) : (
+              // Cap the height so even a large output scrolls in a bounded box
+              // instead of pushing the rest of the notebook away.
+              <div className="min-w-0 flex-1 space-y-1 pb-1 max-h-96 overflow-auto">
+                {cell.outputs.map((o, i) => <Output key={i} output={o} />)}
+              </div>
+            )}
           </div>
         )}
       </div>

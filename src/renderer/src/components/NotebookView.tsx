@@ -21,7 +21,7 @@ interface Props {
 export function NotebookView({ path, onDirtyChange }: Props) {
   const {
     notebooks, specs,
-    addCell, insertCell, moveCell, setCellType, removeCell, updateCode, executeCell,
+    addCell, insertCell, moveCell, setCellType, removeCell, updateCode, revealCell, executeCell,
     saveNotebook, setKernel, setKernelDir,
     runAll, restartAndRunAll, clearAllOutputs,
     interruptKernel, restartKernel, installAndRetry,
@@ -75,6 +75,22 @@ export function NotebookView({ path, onDirtyChange }: Props) {
     listRef.current?.focus()
   }, [])
 
+  // Scroll a cell into view + briefly flash it, so a change isn't missed off-screen
+  // (a fresh cell, or a Claude/app edit). rAF retry covers a just-inserted cell not
+  // yet in the DOM. Scoped to this pane's list so two panes on the same notebook
+  // don't fight.
+  const revealInView = useCallback((id: string, retry = true) => {
+    const el = listRef.current?.querySelector(`[data-cell-id="${id}"]`) as HTMLElement | null
+    if (el) {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      el.classList.remove('nb-flash')
+      void el.offsetWidth  // reflow so re-adding the class restarts the animation
+      el.classList.add('nb-flash')
+    } else if (retry) {
+      requestAnimationFrame(() => revealInView(id, false))
+    }
+  }, [])
+
   // Ctrl/Cmd+S saves. Re-bound each render so it sees the current notebook.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -99,6 +115,12 @@ export function NotebookView({ path, onDirtyChange }: Props) {
     const off = window.api.on.fileChanged((p) => { if (p === path) checkExternalChange(path) })
     return () => { off(); window.api.fs.unwatch(path) }
   }, [path, checkExternalChange])
+
+  // The store asks us to jump to a cell (a new cell, an app-control edit from
+  // Claude). The nonce changes even when the same cell is touched twice.
+  useEffect(() => {
+    if (nb?.reveal) revealInView(nb.reveal.cellId)
+  }, [nb?.reveal?.nonce, revealInView]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const name = path.split('/').pop()
 
@@ -126,7 +148,18 @@ export function NotebookView({ path, onDirtyChange }: Props) {
   const runAdvance = (i: number, id: string) => {
     executeCell(path, id)
     if (i < cells.length - 1) focusCell(cells[i + 1].id)
-    else focusCell(insertCell(path, 'code', cells.length))
+    else { const nid = insertCell(path, 'code', cells.length); focusCell(nid); revealCell(path, nid) }
+  }
+
+  // "+ code" / "+ md": insert right AFTER the cell you're in (the selected one,
+  // which is set on cell mousedown), matching Jupyter's `b` — not at the very end.
+  // Falls back to appending when nothing is selected. Focus + select the new cell.
+  const addAfterCurrent = (type: 'code' | 'markdown') => {
+    const idx = selectedId ? cells.findIndex((c) => c.id === selectedId) : -1
+    const id = insertCell(path, type, idx >= 0 ? idx + 1 : cells.length)
+    setSelectedId(id)
+    focusCell(id)
+    revealCell(path, id)
   }
 
   // Command-mode keys, active only when the cell list (not an editor) has focus.
@@ -141,8 +174,8 @@ export function NotebookView({ path, onDirtyChange }: Props) {
       case 'ArrowDown': case 'j': e.preventDefault(); select(idx + 1); break
       case 'ArrowUp':   case 'k': e.preventDefault(); select(idx - 1); break
       case 'Enter':               e.preventDefault(); focusCell(selectedId); break
-      case 'a': e.preventDefault(); setSelectedId(insertCell(path, 'code', idx)); break
-      case 'b': e.preventDefault(); setSelectedId(insertCell(path, 'code', idx + 1)); break
+      case 'a': { e.preventDefault(); const id = insertCell(path, 'code', idx); setSelectedId(id); revealCell(path, id); break }
+      case 'b': { e.preventDefault(); const id = insertCell(path, 'code', idx + 1); setSelectedId(id); revealCell(path, id); break }
       case 'm': e.preventDefault(); setCellType(path, selectedId, 'markdown'); break
       case 'y': e.preventDefault(); setCellType(path, selectedId, 'code'); break
       case 'd': {
@@ -218,10 +251,10 @@ export function NotebookView({ path, onDirtyChange }: Props) {
         <button onClick={() => restartKernel(path)} disabled={isStarting} className="text-xs text-ctp-overlay hover:text-ctp-text px-1.5 py-0.5 rounded transition-colors disabled:opacity-40">
           restart
         </button>
-        <button onClick={() => addCell(path, 'code')} title="Add code cell" className="text-xs text-ctp-overlay hover:text-ctp-text hover:bg-ctp-surface0 px-1.5 py-0.5 rounded transition-colors">
+        <button onClick={() => addAfterCurrent('code')} title="Add code cell after the current one" className="text-xs text-ctp-overlay hover:text-ctp-text hover:bg-ctp-surface0 px-1.5 py-0.5 rounded transition-colors">
           + code
         </button>
-        <button onClick={() => addCell(path, 'markdown')} title="Add markdown cell" className="text-xs text-ctp-overlay hover:text-ctp-text hover:bg-ctp-surface0 px-1.5 py-0.5 rounded transition-colors">
+        <button onClick={() => addAfterCurrent('markdown')} title="Add markdown cell after the current one" className="text-xs text-ctp-overlay hover:text-ctp-text hover:bg-ctp-surface0 px-1.5 py-0.5 rounded transition-colors">
           + md
         </button>
         <button onClick={save} disabled={!dirty} title="Save (Ctrl/Cmd+S)" className="text-xs px-2 py-0.5 rounded bg-ctp-surface0 text-ctp-text hover:bg-ctp-surface1 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
@@ -273,7 +306,7 @@ export function NotebookView({ path, onDirtyChange }: Props) {
             onRun={() => executeCell(path, cell.id)}
             onRunAdvance={() => runAdvance(i, cell.id)}
             onEscape={() => enterCommandMode(cell.id)}
-            onInsertBelow={() => { executeCell(path, cell.id); focusCell(insertCell(path, 'code', i + 1)) }}
+            onInsertBelow={() => { executeCell(path, cell.id); const nid = insertCell(path, 'code', i + 1); focusCell(nid); revealCell(path, nid) }}
             onMoveUp={() => moveCell(path, i, i - 1)}
             onMoveDown={() => moveCell(path, i, i + 1)}
             onToggleType={() => setCellType(path, cell.id, cell.type === 'code' ? 'markdown' : 'code')}

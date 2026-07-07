@@ -125,6 +125,27 @@ function createWindow(): void {
   })
 
   const rendererUrl = process.env['ELECTRON_RENDERER_URL']
+
+  // Links inside the app (notebook output HTML, chat, docs) must open in the user's
+  // DEFAULT browser — not inside this Electron window. Without this, an <a href>
+  // either navigates the whole app away or spawns a bare Chromium window that looks
+  // like an unfamiliar browser. Hand external URLs to the OS and block the in-app open.
+  const openExternal = (url: string): boolean => {
+    if (/^(https?|mailto):/i.test(url)) { void shell.openExternal(url); return true }
+    return false
+  }
+  // target=_blank / window.open — never let Electron spawn its own window.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openExternal(url)
+    return { action: 'deny' }
+  })
+  // Plain link clicks navigate the current frame; allow only our own renderer
+  // (dev-server URL or the packaged file://) and send everything else to the OS.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const isAppUrl = url.startsWith('file://') || (!!rendererUrl && url.startsWith(rendererUrl))
+    if (!isAppUrl && openExternal(url)) event.preventDefault()
+  })
+
   if (rendererUrl) {
     mainWindow.loadURL(rendererUrl)
   } else {
