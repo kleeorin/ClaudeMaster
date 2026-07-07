@@ -586,9 +586,11 @@ export function NotebookProvider({ children }: { children: ReactNode }) {
           dispatch({ type: 'ADD_OUTPUT', path, cellId, output })
         },
         (count) => {
-          dispatch({ type: 'SET_EXEC_COUNT', path, cellId, count })
+          // count === null ⇒ the run ended without a real reply (socket dropped);
+          // leave the execution count untouched and just stop the spinner.
+          if (count != null) dispatch({ type: 'SET_EXEC_COUNT', path, cellId, count })
           dispatch({ type: 'SET_RUNNING', path, cellId, running: false })
-          resolve(!errored)
+          resolve(count != null && !errored)
         },
       )
     })

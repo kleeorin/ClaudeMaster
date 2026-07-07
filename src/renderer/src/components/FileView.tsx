@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FilePreview as Preview } from '../../../shared/types'
 import { CodeEditor, EditorTools, type EditorHandle } from './CodeEditor'
+import { CsvTable, type CsvTableHandle } from './CsvTable'
+import { delimiterFor } from '../lib/csv'
 import { onFileTouched } from '../lib/fileEvents'
 
 interface Props {
@@ -21,6 +23,7 @@ interface Props {
 export function FileView({ path, onDirtyChange, onSavedAs }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const editorRef = useRef<EditorHandle>(null)
+  const csvTableRef = useRef<CsvTableHandle>(null)
   const [wrap, setWrap] = useState(true)
 
   // Load (and reload on path change) from disk, mirroring how NotebookView is
@@ -37,6 +40,10 @@ export function FileView({ path, onDirtyChange, onSavedAs }: Props) {
   const name = path.split('/').pop() ?? path
   const isText = preview?.kind === 'text'
   const editable = isText && !preview.truncated
+  // CSV/TSV text can be viewed as an editable grid. Default such files to the
+  // table view; the toggle lets the user fall back to raw text.
+  const isCsv = isText && /\.(csv|tsv)$/i.test(name)
+  const [csvMode, setCsvMode] = useState(true)
 
   const [content, setContent] = useState('')
   const [savedContent, setSavedContent] = useState('')
@@ -144,7 +151,42 @@ export function FileView({ path, onDirtyChange, onSavedAs }: Props) {
         {isText && preview.truncated && (
           <span className="text-[10px] text-ctp-yellow shrink-0">truncated · read-only</span>
         )}
-        {isText && <EditorTools editor={editorRef} wrap={wrap} onToggleWrap={() => setWrap((v) => !v)} />}
+        {isCsv && (
+          <div className="flex items-stretch rounded overflow-hidden border border-ctp-surface0 text-[10px] shrink-0">
+            {(['table', 'text'] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setCsvMode(m === 'table')}
+                className={`px-2 py-0.5 capitalize ${
+                  (m === 'table') === csvMode ? 'bg-ctp-surface1 text-ctp-text' : 'text-ctp-subtext hover:bg-ctp-surface0'
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        )}
+        {isCsv && csvMode && editable && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              className="text-xs w-6 h-6 flex items-center justify-center rounded bg-ctp-surface0 text-ctp-subtext hover:bg-ctp-surface1 hover:text-ctp-text"
+              title="Undo (Ctrl/Cmd+Z)"
+              onClick={() => csvTableRef.current?.undo()}
+            >
+              ↶
+            </button>
+            <button
+              className="text-xs w-6 h-6 flex items-center justify-center rounded bg-ctp-surface0 text-ctp-subtext hover:bg-ctp-surface1 hover:text-ctp-text"
+              title="Redo (Ctrl/Cmd+Shift+Z)"
+              onClick={() => csvTableRef.current?.redo()}
+            >
+              ↷
+            </button>
+          </div>
+        )}
+        {isText && !(isCsv && csvMode) && (
+          <EditorTools editor={editorRef} wrap={wrap} onToggleWrap={() => setWrap((v) => !v)} />
+        )}
         {editable && (
           <>
             <button
@@ -196,10 +238,24 @@ export function FileView({ path, onDirtyChange, onSavedAs }: Props) {
           />
         )}
 
-        {preview.kind === 'text' && (
+        {preview.kind === 'text' && isCsv && csvMode && (
+          <CsvTable
+            ref={csvTableRef}
+            value={content}
+            delimiter={delimiterFor(preview.name)}
+            readOnly={!editable}
+            onChange={setContent}
+          />
+        )}
+
+        {preview.kind === 'text' && !(isCsv && csvMode) && (
           <CodeEditor
             ref={editorRef}
-            initialDoc={preview.text}
+            // CSV defaults to the table view, so this editor only mounts after a
+            // toggle — seed it with the current (maybe table-edited) content, not
+            // the original file text. Non-CSV mounts here first, before content is
+            // seeded, so it must use preview.text.
+            initialDoc={isCsv ? content : preview.text}
             filename={preview.name}
             readOnly={!editable}
             wrap={wrap}
