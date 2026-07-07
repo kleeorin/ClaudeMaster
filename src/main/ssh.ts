@@ -129,8 +129,22 @@ export function runBuffer(
   })
 }
 
-// Full ssh argv for an interactive session: force a tty (-tt) and run one remote
-// command string. Used by SessionManager (stream-json) and PaneManager.
+// Full ssh argv for a remote session that runs one command string. Used by two
+// KINDS of caller, distinguished by `opts.pty` (default true):
+//
+//  - pty:true  — the pane + TUI backends, which wrap this in a real local pty via
+//    node-pty. Force remote pty allocation (-tt) and keep interactive auth
+//    (batch=false) so a passphrase / first-time host-key prompt can be answered in
+//    the terminal.
+//  - pty:false — the native stream-json engine (ClaudeEngine), which spawns ssh
+//    over PLAIN PIPES with no local tty and speaks line-delimited JSON both ways.
+//    Forcing a remote pty there is wrong: the remote tty line discipline (ONLCR +
+//    local echo) reflects our own stdin JSON back onto stdout and mangles framing,
+//    so the engine never parses a clean event and the session sits as a silent dud.
+//    So we DISABLE pty allocation (-T, which also overrides any `RequestTTY force`
+//    in the user's ssh_config) and use BatchMode (batch=true) — same fail-fast
+//    semantics as the fs/git path, so a missing credential errors instead of
+//    blocking forever on a stdin nothing can answer.
 //
 // `reverseTunnel` (a port) adds `-R port:127.0.0.1:port` so remote `claude` can
 // reach the LOCAL app-control MCP server (remote localhost:port → local port).
@@ -138,13 +152,21 @@ export function runBuffer(
 // *secondary* session is silently ignored, so we skip control multiplexing when
 // tunnelling. The long-lived claude connection gains little from multiplexing
 // anyway (it's the frequent short fs/git calls that benefit).
-export function interactiveArgs(remote: RemoteConfig, remoteCmd: string, reverseTunnel?: number): string[] {
+export function interactiveArgs(
+  remote: RemoteConfig,
+  remoteCmd: string,
+  reverseTunnel?: number,
+  opts: { pty?: boolean } = {},
+): string[] {
+  const pty = opts.pty ?? true
+  const tty = pty ? '-tt' : '-T'  // force vs. explicitly disable remote pty allocation
+  const batch = !pty              // headless pipe path fails fast; interactive pty can prompt
   if (reverseTunnel) {
     // sshBaseArgs(noControl) ends with the host; insert -R before it.
-    const optsThenHost = sshBaseArgs(remote, false, { noControl: true })
+    const optsThenHost = sshBaseArgs(remote, batch, { noControl: true })
     const host = optsThenHost[optsThenHost.length - 1]
-    const opts = optsThenHost.slice(0, -1)
-    return [...opts, '-R', `${reverseTunnel}:127.0.0.1:${reverseTunnel}`, host, '-tt', remoteCmd]
+    const base = optsThenHost.slice(0, -1)
+    return [...base, '-R', `${reverseTunnel}:127.0.0.1:${reverseTunnel}`, host, tty, remoteCmd]
   }
-  return [...sshBaseArgs(remote, false), '-tt', remoteCmd]
+  return [...sshBaseArgs(remote, batch), tty, remoteCmd]
 }

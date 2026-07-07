@@ -7,7 +7,7 @@
     "dev": "electron-vite dev -- --no-sandbox",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "rebuild": "electron-rebuild",
+    "rebuild": "electron-rebuild && node scripts/fix-native-perms.cjs",
     "postinstall": "node scripts/fix-native-perms.cjs"
   },
   "dependencies": {

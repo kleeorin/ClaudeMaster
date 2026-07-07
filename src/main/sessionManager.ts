@@ -149,7 +149,9 @@ export class SessionManager extends EventEmitter implements SessionBackend {
     const engine = remote
       ? new ClaudeEngine({
           command: 'ssh',
-          args: ssh.interactiveArgs(remote, remoteClaudeCmd(parseTarget(cwd).path || '.', args), tunnelPort),
+          // pty:false — ClaudeEngine spawns this over plain pipes and parses
+          // line-delimited JSON; a forced remote pty (-tt) would corrupt the framing.
+          args: ssh.interactiveArgs(remote, remoteClaudeCmd(parseTarget(cwd).path || '.', args), tunnelPort, { pty: false }),
           cwd: homedir(),
           env: process.env as Record<string, string>,
         })
