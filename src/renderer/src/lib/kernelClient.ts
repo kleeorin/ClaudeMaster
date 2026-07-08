@@ -162,6 +162,14 @@ export class KernelClient {
 
   // Send a cheap request and expect *some* traffic back shortly. Silence past the
   // timeout means a half-open socket (e.g. a dead SSH tunnel) — force a reconnect.
+  //
+  // The ping MUST go on the 'control' channel, not 'shell'. Shell is where
+  // execute_request runs, and the kernel services it strictly one-at-a-time, so a
+  // ping on 'shell' queues behind a long-running cell and can't be answered until
+  // that cell finishes. A cell that runs longer than HEARTBEAT_TIMEOUT_MS would
+  // then trip a bogus "kernel dead" reconnect mid-execution. The control channel
+  // has its own queue serviced independently for exactly this purpose, so a busy
+  // kernel still answers kernel_info_request promptly.
   private ping() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
     const msgId = crypto.randomUUID()
@@ -173,7 +181,7 @@ export class KernelClient {
         metadata: {},
         content: {},
         buffers: [],
-        channel: 'shell',
+        channel: 'control',
       }))
     } catch {
       this.forceReconnect()
